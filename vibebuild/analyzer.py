@@ -3,6 +3,8 @@ SRPM and spec file analyzer for extracting BuildRequires.
 """
 
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -273,3 +275,30 @@ def get_build_requires(srpm_path: str) -> list[str]:
                 requires.append(line)
 
         return requires
+
+
+def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
+    """
+    Extract full package information from SRPM.
+
+    Args:
+        srpm_path: Path to .src.rpm file
+
+    Returns:
+        PackageInfo with all extracted data
+    """
+    srpm_path = Path(srpm_path)
+    if not srpm_path.exists():
+        raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        subprocess.run(
+            f"rpm2cpio {srpm_path} | cpio -idmv", shell=True, cwd=tmpdir, capture_output=True
+        )
+
+        spec_files = list(Path(tmpdir).glob("*.spec"))
+        if not spec_files:
+            raise InvalidSRPMError(f"No spec file found in SRPM: {srpm_path}")
+
+        analyzer = SpecAnalyzer()
+        return analyzer.analyze_spec(str(spec_files[0]))
