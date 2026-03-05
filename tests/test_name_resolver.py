@@ -325,3 +325,211 @@ class TestPackageNameResolverMLFallback:
         result = resolver.resolve("custom_provider(something)")
 
         assert result == "custom_provider(something)"
+
+
+class TestSystemMacros:
+    """Test that SYSTEM_MACROS contains expected entries."""
+
+    def test_python3_pkgversion(self):
+        assert SYSTEM_MACROS["python3_pkgversion"] == "3"
+
+    def test_python3_version(self):
+        assert SYSTEM_MACROS["python3_version"] == "3.12"
+
+    def test_prefix(self):
+        assert SYSTEM_MACROS["_prefix"] == "/usr"
+
+    def test_bindir(self):
+        assert SYSTEM_MACROS["_bindir"] == "/usr/bin"
+
+    def test_libdir(self):
+        assert SYSTEM_MACROS["_libdir"] == "/usr/lib64"
+
+
+class TestProvidePatterns:
+    """Test that PROVIDE_PATTERNS list is well-formed."""
+
+    def test_patterns_are_compiled(self):
+        for pattern, fn in PROVIDE_PATTERNS:
+            assert hasattr(pattern, "match"), f"Pattern {pattern} is not compiled"
+
+    def test_patterns_count(self):
+        assert len(PROVIDE_PATTERNS) >= 9
+
+
+class TestResolveVirtualProvide:
+    """Test resolve_virtual_provide directly."""
+
+    def test_returns_none_for_plain_name(self):
+        resolver = PackageNameResolver()
+
+        result = resolver.resolve_virtual_provide("gcc")
+
+        assert result is None
+
+    def test_returns_none_for_unknown_provider(self):
+        resolver = PackageNameResolver()
+
+        result = resolver.resolve_virtual_provide("custom(something)")
+
+        assert result is None
+
+    def test_returns_resolved_for_known_provider(self):
+        resolver = PackageNameResolver()
+
+        result = resolver.resolve_virtual_provide("python3dist(flask)")
+
+        assert result == "python3-flask"
+
+
+class TestExpandMacrosWithDefault:
+    """Test conditional macros with default values like %{?macro:default}."""
+
+    def test_expand_known_macro_with_default(self):
+        """Known macro with default should use macro value, not default."""
+        resolver = PackageNameResolver()
+
+        result = resolver.expand_macros("%{?python3_pkgversion:2}")
+
+        assert result == "3"
+
+    def test_expand_unknown_macro_with_default(self):
+        """Unknown macro with default should use default value."""
+        resolver = PackageNameResolver()
+
+        result = resolver.expand_macros("%{?nonexistent_macro:fallback_value}")
+
+        assert result == "fallback_value"
+
+    def test_expand_macro_default_empty(self):
+        """Macro with colon but empty default."""
+        resolver = PackageNameResolver()
+
+        result = resolver.expand_macros("%{?nonexistent:}")
+
+        assert result == ""
+
+
+class TestGetDownloadCandidates:
+    """Test get_download_candidates for full coverage."""
+
+    def test_plain_name_no_resolver(self):
+        """Plain name without ML resolver."""
+        resolver = PackageNameResolver(ml_resolver=None)
+
+        result = resolver.get_download_candidates("gcc")
+
+        assert "gcc" in result
+
+    def test_python3_name_generates_variants(self):
+        """python3-X should generate python-X and python3-X variants."""
+        resolver = PackageNameResolver(ml_resolver=None)
+
+        result = resolver.get_download_candidates("python3-requests")
+
+        assert "python-requests" in result
+        assert "python3-requests" in result
+
+    def test_with_ml_resolver_dict_result(self):
+        """ML resolver returning dict with srpm_name and rpm_name."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": "python-requests", "rpm_name": "python3-requests"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("python3dist(requests)")
+
+        assert "python-requests" in result
+        assert "python3-requests" in result
+
+    def test_with_ml_resolver_exception(self):
+        """ML resolver exception should be caught silently."""
+        mock_ml = Mock()
+        mock_ml.predict.side_effect = RuntimeError("ML error")
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("gcc")
+
+        assert "gcc" in result
+
+    def test_with_ml_resolver_returns_none(self):
+        """ML resolver returning None should be handled."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = None
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("gcc")
+
+        assert "gcc" in result
+
+    def test_deduplication(self):
+        """Candidates should be deduplicated."""
+        resolver = PackageNameResolver(ml_resolver=None)
+
+        result = resolver.get_download_candidates("gcc")
+
+        assert len(result) == len(set(result))
+
+    def test_resolved_different_from_name_adds_srpm_variants(self):
+        """When resolved != name, srpm variants of resolved should be added."""
+        resolver = PackageNameResolver(ml_resolver=None)
+
+        result = resolver.get_download_candidates("python3dist(requests)")
+
+        # resolved will be python3-requests
+        assert "python3-requests" in result
+        # srpm variant: python-requests
+        assert "python-requests" in result
+
+    def test_ml_resolver_dict_with_no_srpm(self):
+        """ML resolver dict with None srpm_name should skip it."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": None, "rpm_name": "python3-requests"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("python3dist(requests)")
+
+        assert "python3-requests" in result
+
+    def test_ml_resolver_dict_rpm_same_as_srpm(self):
+        """ML resolver dict with same srpm_name and rpm_name should deduplicate."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": "same-pkg", "rpm_name": "same-pkg"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("some-pkg")
+
+        assert result.count("same-pkg") == 1
+
+    def test_ml_resolver_dict_with_no_rpm(self):
+        """ML resolver dict with None rpm_name should skip it."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": "python-requests", "rpm_name": None}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("python3dist(requests)")
+
+        assert "python-requests" in result
+
+
+class TestMLFallbackDictResult:
+    """Test ML fallback returning dict with rpm_name."""
+
+    def test_ml_returns_dict_with_rpm_name(self):
+        """ML resolver returning dict should use rpm_name."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"rpm_name": "resolved-pkg", "srpm_name": "resolved-src"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.resolve("custom_provider(something)")
+
+        assert result == "resolved-pkg"
+
+    def test_ml_returns_dict_with_same_rpm_name_falls_through(self):
+        """ML dict with rpm_name same as input should fall through."""
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"rpm_name": "custom_provider(something)", "srpm_name": "src"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.resolve("custom_provider(something)")
+
+        assert result == "custom_provider(something)"
