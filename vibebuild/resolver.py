@@ -174,13 +174,8 @@ class DependencyResolver:
         self._available_packages = None
 
     def _check_external_repos(self) -> bool:
-        """Check if the build tag has external repos configured (cached)."""
-        if self._has_external_repos is None:
-            try:
-                self._has_external_repos = self.koji.has_external_repos(self.koji_tag)
-            except Exception:
-                self._has_external_repos = False
-        return self._has_external_repos
+        """External repos check stub — full implementation comes later."""
+        return False
 
 
     def _is_our_package(self, package_name: str) -> bool:
@@ -334,3 +329,110 @@ class DependencyResolver:
 
         resolve_deps(root_package, srpm_path)
         return self._dependency_graph
+
+    def topological_sort(self) -> list[str]:
+        """
+        Return packages in build order (dependencies first).
+
+        Returns:
+            List of package names in order they should be built
+
+        Raises:
+            CircularDependencyError: If circular dependency detected
+        """
+        if not self._dependency_graph:
+            return []
+
+        adj: dict[str, list[str]] = defaultdict(list)
+        for node in self._dependency_graph.values():
+            for dep in node.dependencies:
+                if dep in self._dependency_graph:
+                    adj[dep].append(node.name)
+
+        in_degree: dict[str, int] = {}
+        for name, node in self._dependency_graph.items():
+            in_degree[name] = sum(
+                1
+                for dep in node.dependencies
+                if dep in self._dependency_graph and not self._dependency_graph[dep].is_available
+            )
+
+        queue = [
+            name
+            for name, degree in in_degree.items()
+            if degree == 0
+            and name in self._dependency_graph
+            and not self._dependency_graph[name].is_available
+        ]
+
+        result = []
+        order = 0
+
+        while queue:
+            pkg = queue.pop(0)
+
+            if pkg in self._dependency_graph and not self._dependency_graph[pkg].is_available:  # pragma: no branch
+                result.append(pkg)
+                self._dependency_graph[pkg].build_order = order
+                order += 1
+
+            for dependent in adj.get(pkg, []):
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+
+        needs_build = [
+            name for name, node in self._dependency_graph.items() if not node.is_available
+        ]
+
+        if len(result) < len(needs_build):
+            missing = set(needs_build) - set(result)
+            raise CircularDependencyError(f"Circular dependency detected involving: {missing}")
+
+        return result
+
+    def get_build_chain(self) -> list[list[str]]:
+        """
+        Get packages grouped by build level (parallel builds).
+
+        Packages in the same group can be built in parallel.
+
+        Returns:
+            List of lists, each inner list contains packages that can be built together
+        """
+        sorted_packages = self.topological_sort()
+
+        if not sorted_packages:
+            return []
+
+        levels: dict[str, int] = {}
+
+        for pkg in sorted_packages:
+            node = self._dependency_graph.get(pkg)
+            if not node:
+                continue
+
+            if not node.dependencies:
+                levels[pkg] = 0
+            else:
+                max_dep_level = -1
+                for dep in node.dependencies:
+                    if dep in levels:
+                        max_dep_level = max(max_dep_level, levels[dep])
+                levels[pkg] = max_dep_level + 1
+
+        max_level = max(levels.values()) if levels else 0
+        chains: list[list[str]] = [[] for _ in range(max_level + 1)]
+
+        for pkg, level in levels.items():
+            chains[level].append(pkg)
+
+        return [chain for chain in chains if chain]
+
+    def get_missing_packages(self) -> list[str]:
+        """Get list of packages that need to be built."""
+        return [
+            name
+            for name, node in self._dependency_graph.items()
+            if not node.is_available and node.srpm_path is None
+        ]
