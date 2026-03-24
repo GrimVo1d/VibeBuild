@@ -174,8 +174,13 @@ class DependencyResolver:
         self._available_packages = None
 
     def _check_external_repos(self) -> bool:
-        """External repos check stub — full implementation comes later."""
-        return False
+        """Check if the build tag has external repos configured (cached)."""
+        if self._has_external_repos is None:
+            try:
+                self._has_external_repos = self.koji.has_external_repos(self.koji_tag)
+            except Exception:
+                self._has_external_repos = False
+        return self._has_external_repos
 
 
     def _is_our_package(self, package_name: str) -> bool:
