@@ -254,3 +254,163 @@ class KojiBuilder:
             task.status = BuildStatus.COMPLETE
 
         return task
+
+    def _poll_build(self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30) -> BuildStatus:
+        """Poll a build task with progress logging."""
+        start = time.time()
+        last_state = ""
+
+        while time.time() - start < timeout:
+            result = self._run_koji("taskinfo", str(task_id), timeout=120)
+            if result.returncode != 0:
+                logger.warning(f"  [{nvr}] Could not get task info")
+                time.sleep(interval)
+                continue
+
+            output = result.stdout
+            # Parse current state
+            state = "unknown"
+            for line in output.split("\n"):
+                if line.startswith("State:"):
+                    state = line.split(":", 1)[1].strip().lower()
+                    break
+
+            # Parse subtasks for more detail
+            subtasks = []
+            sub_result = self._run_koji("list-tasks", f"--parent={task_id}")
+            if sub_result.returncode == 0:
+                for line in sub_result.stdout.strip().split("\n"):
+                    if line and not line.startswith("ID"):
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            sub_state = parts[3]
+                            sub_name = " ".join(parts[5:])
+                            subtasks.append(f"{sub_name} [{sub_state}]")
+
+            elapsed = int(time.time() - start)
+            minutes, seconds = divmod(elapsed, 60)
+
+            if subtasks:
+                current = ", ".join(subtasks[:3])
+                progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {current}"
+            else:
+                progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {state}"
+
+            if progress != last_state:
+                logger.info(progress)
+                last_state = progress
+
+            if state in ("closed", "complete"):
+                return BuildStatus.COMPLETE
+            elif state == "failed":
+                logger.error(f"  [{nvr}] Build FAILED (task {task_id})")
+                return BuildStatus.FAILED
+            elif state == "canceled":
+                return BuildStatus.CANCELED
+
+            time.sleep(interval)
+
+        logger.error(f"  [{nvr}] Build timed out after {timeout}s")
+        return BuildStatus.FAILED
+
+    def _poll_builds(self, tasks: list, timeout: int = 7200, interval: int = 30) -> None:
+        """Poll multiple build tasks simultaneously until all complete or timeout.
+
+        Args:
+            tasks: List of BuildTask objects with task_id set
+            timeout: Maximum time to wait in seconds
+            interval: Seconds between polling sweeps
+        """
+        pending = {t.task_id: t for t in tasks if t.task_id}
+        if not pending:
+            return
+
+        start = time.time()
+
+        while pending and time.time() - start < timeout:
+            completed_ids = []
+            for task_id, task in pending.items():
+                result = self._run_koji("taskinfo", str(task_id), timeout=120)
+                if result.returncode != 0:
+                    continue
+
+                state = "unknown"
+                for line in result.stdout.split("\n"):
+                    if line.startswith("State:"):
+                        state = line.split(":", 1)[1].strip().lower()
+                        break
+
+                if state in ("closed", "complete"):
+                    task.status = BuildStatus.COMPLETE
+                    completed_ids.append(task_id)
+                elif state == "failed":
+                    task.status = BuildStatus.FAILED
+                    task.error_message = f"Build task {task_id} failed"
+                    completed_ids.append(task_id)
+                elif state == "canceled":
+                    task.status = BuildStatus.CANCELED
+                    completed_ids.append(task_id)
+
+            for tid in completed_ids:
+                del pending[tid]
+
+            if pending:
+                elapsed = int(time.time() - start)
+                minutes, seconds = divmod(elapsed, 60)
+                names = ", ".join(t.package_name for t in pending.values())
+                logger.info(f"  [{minutes}m{seconds:02d}s] Waiting for: {names}")
+                time.sleep(interval)
+
+        # Timeout remaining tasks
+        for task in pending.values():
+            task.status = BuildStatus.FAILED
+            task.error_message = f"Build timed out after {timeout}s"
+            logger.error(f"  [{task.package_name}] Build timed out after {timeout}s")
+
+    def _ensure_repo_ready(self) -> None:
+        """Ensure a repo exists for the build tag, creating one if needed."""
+        result = self._run_koji("list-tasks", timeout=120)
+        has_newrepo = result.returncode == 0 and "newRepo" in result.stdout
+
+        if not has_newrepo:
+            regen = self._run_koji("call", "newRepo", self.build_tag, timeout=120)
+            if regen.returncode == 0:
+                logger.info(f"Triggered newRepo for {self.build_tag}")
+
+        logger.info(f"Waiting for repo to be ready: {self.build_tag}")
+        wait_result = self._run_koji(
+            "wait-repo", self.build_tag, "--timeout=1800", timeout=1860
+        )
+        if wait_result.returncode == 0:
+            logger.info("Repo is ready")
+        else:
+            logger.warning(f"wait-repo returned non-zero, proceeding anyway")
+
+    def wait_for_repo(self, tag: Optional[str] = None, timeout: int = 1800) -> bool:
+        """
+        Wait for repository to be regenerated after build.
+
+        Args:
+            tag: Build tag to wait for (defaults to self.build_tag)
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            True if repo was regenerated successfully
+        """
+        tag = tag or self.build_tag
+
+        logger.info(f"Waiting for repo regeneration: {tag}")
+
+        # Trigger newRepo explicitly — some Koji setups don't auto-create it
+        regen_result = self._run_koji("call", "newRepo", tag, timeout=120)
+        if regen_result.returncode == 0:
+            logger.info(f"Triggered newRepo for {tag}")
+
+        result = self._run_koji("wait-repo", tag, f"--timeout={timeout}", timeout=timeout + 60)
+
+        if result.returncode != 0:
+            logger.warning(f"wait-repo failed: {result.stderr}")
+            return False
+
+        logger.info("Repo regenerated successfully")
+        return True
