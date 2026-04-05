@@ -414,3 +414,192 @@ class KojiBuilder:
 
         logger.info("Repo regenerated successfully")
         return True
+
+    def build_with_deps(self, srpm_path: str) -> BuildResult:
+        """
+        Build package with automatic dependency resolution.
+
+        This is the main vibebuild function. It:
+        1. Analyzes the SRPM for BuildRequires
+        2. Finds which dependencies are missing
+        3. Downloads SRPMs for missing deps from Fedora
+        4. Recursively resolves all dependencies
+        5. Builds everything in correct order
+
+        Args:
+            srpm_path: Path to SRPM file to build
+
+        Returns:
+            BuildResult with all build information
+        """
+        start_time = time.time()
+        result = BuildResult(success=True)
+
+        srpm_path = Path(srpm_path)
+        if not srpm_path.exists():
+            raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+
+        logger.info(f"Starting vibebuild for: {srpm_path}")
+
+        # Ensure repo is ready before dependency resolution and builds
+        self._ensure_repo_ready()
+
+        package_info = get_package_info_from_srpm(str(srpm_path))
+        logger.info(f"Package: {package_info.nvr}")
+
+        logger.info("Analyzing dependencies...")
+
+        def srpm_resolver(pkg_name: str) -> Optional[str]:
+            try:
+                logger.info(f"Downloading dependency: {pkg_name}")
+                path = self.fetcher.download_srpm(pkg_name)
+                logger.info(f"Downloaded: {pkg_name} -> {path}")
+                return path
+            except Exception as e:
+                logger.warning(f"Could not download SRPM for {pkg_name}: {e}")
+                return None
+
+        self.resolver.build_dependency_graph(
+            package_info.name, str(srpm_path), srpm_resolver=srpm_resolver
+        )
+
+        build_chain = self.resolver.get_build_chain()
+
+        if not build_chain:
+            logger.info("No dependencies to build, proceeding with target package")
+        else:
+            total_deps = sum(len(level) for level in build_chain)
+            logger.info(f"Found {total_deps} packages to build in {len(build_chain)} levels")
+
+            for level_idx, level in enumerate(build_chain):
+                logger.info(f"Building level {level_idx + 1}/{len(build_chain)}: {level}")
+
+                # Submit all packages in this level in parallel
+                level_tasks = []
+                for pkg_name in level:
+                    if pkg_name == package_info.name:
+                        continue
+
+                    node = self.resolver._dependency_graph.get(pkg_name)
+                    if not node or not node.srpm_path:
+                        logger.warning(f"Skipping {pkg_name}: no SRPM available")
+                        continue
+
+                    try:
+                        task = self._submit_build(node.srpm_path)
+                        level_tasks.append(task)
+                        result.tasks.append(task)
+                    except Exception as e:
+                        logger.error(f"Failed to submit {pkg_name}: {e}")
+                        result.failed_packages.append(pkg_name)
+
+                # Poll all submitted tasks simultaneously
+                if level_tasks:
+                    self._poll_builds(level_tasks)
+
+                    level_built = 0
+                    for task in level_tasks:
+                        if task.status == BuildStatus.COMPLETE:
+                            result.built_packages.append(task.package_name)
+                            level_built += 1
+                        else:
+                            result.failed_packages.append(task.package_name)
+                            result.success = False
+
+                    # Wait for repo between levels (not after last level)
+                    if level_built > 0 and level_idx < len(build_chain) - 1:
+                        self.wait_for_repo()
+
+        # Wait for repo once before target if any deps were built
+        if result.built_packages:
+            self.wait_for_repo()
+
+        if result.success or not result.failed_packages:
+            logger.info(f"Building target package: {package_info.nvr}")
+
+            try:
+                task = self.build_package(str(srpm_path), wait=True)
+                result.tasks.append(task)
+
+                if task.status == BuildStatus.COMPLETE:
+                    result.built_packages.append(package_info.name)
+                elif task.status == BuildStatus.BUILDING and self.nowait:
+                    # --nowait: build was submitted successfully, not a failure
+                    result.built_packages.append(package_info.name)
+                else:
+                    result.failed_packages.append(package_info.name)
+                    result.success = False
+
+            except Exception as e:
+                logger.error(f"Failed to build target package: {e}")
+                result.failed_packages.append(package_info.name)
+                result.success = False
+
+        result.total_time = time.time() - start_time
+
+        logger.info(f"VibeBuild complete in {result.total_time:.1f}s")
+        logger.info(f"Built: {len(result.built_packages)}, Failed: {len(result.failed_packages)}")
+
+        return result
+
+    def build_chain(self, packages: list[tuple[str, str]]) -> BuildResult:
+        """
+        Build multiple packages in order.
+
+        Args:
+            packages: List of (package_name, srpm_path) tuples
+
+        Returns:
+            BuildResult with all build information
+        """
+        start_time = time.time()
+        result = BuildResult(success=True)
+
+        for pkg_name, srpm_path in packages:
+            try:
+                task = self.build_package(srpm_path, wait=True)
+                result.tasks.append(task)
+
+                if task.status == BuildStatus.COMPLETE:
+                    result.built_packages.append(pkg_name)
+                    self.wait_for_repo()
+                elif task.status == BuildStatus.BUILDING and self.nowait:
+                    result.built_packages.append(pkg_name)
+                else:
+                    result.failed_packages.append(pkg_name)
+                    result.success = False
+                    break
+
+            except Exception as e:
+                logger.error(f"Failed to build {pkg_name}: {e}")
+                result.failed_packages.append(pkg_name)
+                result.success = False
+                break
+
+        result.total_time = time.time() - start_time
+        return result
+
+    def get_build_status(self, task_id: int) -> BuildStatus:
+        """Get current status of a build task."""
+        result = self._run_koji("taskinfo", str(task_id))
+
+        if result.returncode != 0:
+            return BuildStatus.FAILED
+
+        output = result.stdout.lower()
+
+        if "closed" in output or "complete" in output:
+            return BuildStatus.COMPLETE
+        elif "failed" in output:
+            return BuildStatus.FAILED
+        elif "canceled" in output:
+            return BuildStatus.CANCELED
+        elif "open" in output or "free" in output or "assigned" in output:
+            return BuildStatus.BUILDING
+
+        return BuildStatus.PENDING
+
+    def cancel_build(self, task_id: int) -> bool:
+        """Cancel a running build task."""
+        result = self._run_koji("cancel", str(task_id))
+        return result.returncode == 0
