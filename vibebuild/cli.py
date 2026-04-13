@@ -340,6 +340,109 @@ def print_build_result(result: BuildResult) -> None:
     print("=" * 60)
 
 
+def cmd_analyze(
+    srpm_path: str,
+    server: str,
+    build_tag: str,
+    cert: Optional[str],
+    serverca: Optional[str],
+    no_ssl_verify: bool = False,
+) -> int:
+    """Analyze SRPM dependencies."""
+    print(f"Analyzing: {srpm_path}")
+
+    try:
+        package_info = get_package_info_from_srpm(srpm_path)
+        print(f"\nPackage: {package_info.name}")
+        print(f"Version: {package_info.version}")
+        print(f"Release: {package_info.release}")
+        print(f"NVR: {package_info.nvr}")
+
+        print(f"\nBuildRequires ({len(package_info.build_requires)}):")
+        for req in package_info.build_requires:
+            print(f"  - {req}")
+
+        print("\nChecking availability in Koji...")
+
+        koji_client = KojiClient(
+            server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
+        )
+        resolver = DependencyResolver(koji_client=koji_client, koji_tag=build_tag)
+
+        missing = resolver.find_missing_deps([r.name for r in package_info.build_requires])
+
+        if missing:
+            print(f"\nMissing dependencies ({len(missing)}):")
+            for dep in missing:
+                print(f"  ✗ {dep}")
+        else:
+            print("\n✓ All dependencies available")
+
+        return 0
+
+    except Exception as e:
+        logging.error(f"Analysis failed: {e}")
+        return 1
+
+
+def ensure_srpm_path(
+    srpm_arg: str,
+    download_dir: Optional[str],
+    no_ssl_verify: bool,
+    no_ml: bool,
+    ml_model_path: Optional[str],
+    fedora_release: str = "rawhide",
+) -> str:
+    """
+    Return path to an SRPM file. If srpm_arg is an existing path, return it.
+    Otherwise treat as package name, download SRPM, and return its path.
+    """
+    p = Path(srpm_arg)
+    if p.exists():
+        return str(p.resolve())
+    # Package name: download first
+    logging.info("Downloading SRPM for: %s", srpm_arg)
+    name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
+    fetcher = SRPMFetcher(
+        download_dir=download_dir,
+        fedora_release=fedora_release,
+        no_ssl_verify=no_ssl_verify,
+        name_resolver=name_resolver,
+    )
+    path = fetcher.download_srpm(srpm_arg)
+    logging.info("Downloaded: %s", path)
+    return path
+
+
+def cmd_download(
+    package_name: str,
+    download_dir: Optional[str],
+    no_ssl_verify: bool = False,
+    no_ml: bool = False,
+    ml_model_path: Optional[str] = None,
+    fedora_release: str = "rawhide",
+) -> int:
+    """Download SRPM from Fedora."""
+    print(f"Downloading SRPM for: {package_name}")
+
+    try:
+        name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
+        fetcher = SRPMFetcher(
+            download_dir=download_dir,
+            fedora_release=fedora_release,
+            no_ssl_verify=no_ssl_verify,
+            name_resolver=name_resolver,
+        )
+        srpm_path = fetcher.download_srpm(package_name)
+
+        print(f"✓ Downloaded: {srpm_path}")
+        return 0
+
+    except Exception as e:
+        logging.error(f"Download failed: {e}")
+        return 1
+
+
 def main(args: Optional[list[str]] = None) -> int:
     """Main entry point."""
     parser = create_parser()
