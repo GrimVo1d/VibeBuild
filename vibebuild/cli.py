@@ -443,13 +443,224 @@ def cmd_download(
         return 1
 
 
+def cmd_build(
+    target: str,
+    srpm_path: str,
+    server: str,
+    web_url: str,
+    cert: Optional[str],
+    serverca: Optional[str],
+    build_tag: str,
+    scratch: bool,
+    nowait: bool,
+    no_deps: bool,
+    download_dir: Optional[str],
+    dry_run: bool,
+    no_ssl_verify: bool = False,
+    no_name_resolution: bool = False,
+    no_ml: bool = False,
+    ml_model_path: Optional[str] = None,
+    fedora_release: str = "rawhide",
+) -> int:
+    """Build package with dependency resolution."""
+    srpm = Path(srpm_path)
+    if not srpm.exists():
+        logging.error(f"SRPM not found: {srpm_path}")
+        return 1
+
+    builder = KojiBuilder(
+        koji_server=server,
+        koji_web_url=web_url,
+        cert=cert,
+        serverca=serverca,
+        target=target,
+        build_tag=build_tag,
+        scratch=scratch,
+        nowait=nowait,
+        download_dir=download_dir,
+        no_ssl_verify=no_ssl_verify,
+        no_name_resolution=no_name_resolution,
+        no_ml=no_ml,
+        ml_model_path=ml_model_path,
+        fedora_release=fedora_release,
+    )
+
+    if dry_run:
+        print("DRY RUN - showing what would be built:\n")
+
+        package_info = get_package_info_from_srpm(str(srpm))
+        print(f"Target package: {package_info.nvr}")
+
+        if not no_deps:
+
+            def srpm_resolver(pkg: str) -> Optional[str]:
+                try:
+                    return builder.fetcher.download_srpm(pkg)
+                except Exception:
+                    return None
+
+            builder.resolver.build_dependency_graph(
+                package_info.name, str(srpm), srpm_resolver=srpm_resolver
+            )
+
+            build_chain = builder.resolver.get_build_chain()
+
+            if build_chain:
+                print(f"\nBuild order ({sum(len(lvl) for lvl in build_chain)} packages):")
+                for level_idx, level in enumerate(build_chain):
+                    print(f"  Level {level_idx + 1}: {', '.join(level)}")
+            else:
+                print("\nNo additional dependencies to build")
+
+        return 0
+
+    try:
+        if no_deps:
+            task = builder.build_package(str(srpm), wait=not nowait)
+            result = BuildResult(
+                success=task.status == BuildStatus.COMPLETE,
+                tasks=[task],
+                built_packages=[task.package_name] if task.status == BuildStatus.COMPLETE else [],
+                failed_packages=[task.package_name] if task.status != BuildStatus.COMPLETE else [],
+            )
+        else:
+            result = builder.build_with_deps(str(srpm))
+
+        print_build_result(result)
+
+        return 0 if result.success else 1
+
+    except VibeBuildError as e:
+        logging.error(f"Build failed: {e}")
+        return 1
+    except Exception as e:
+        logging.exception(f"Unexpected error: {e}")
+        return 1
+
+
 def main(args: Optional[list[str]] = None) -> int:
-    """Main entry point."""
+    """Main entry point.
+
+    Positional argument resolution:
+      vibebuild SRPM          -- target is read from ~/.koji/config [koji]
+      vibebuild TARGET SRPM   -- explicit target (backwards-compatible)
+    """
     parser = create_parser()
     opts = parser.parse_args(args)
+
+    if getattr(opts, "help_all", False):
+        print(parser.format_help())
+        return 0
+
     setup_logging(opts.verbose, opts.quiet)
-    parser.error("not yet implemented")
-    return 1
+
+    if opts.no_ssl_verify:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if opts.analyze_only:
+        srpm_arg = opts.srpm or opts.target
+        if not srpm_arg:
+            parser.error("--analyze-only requires SRPM path or package name")
+
+        # Determine fedora_release for potential download
+        analyze_release = getattr(opts, "fedora_release", None) or "rawhide"
+
+        try:
+            srpm_path = ensure_srpm_path(
+                srpm_arg,
+                opts.download_dir,
+                opts.no_ssl_verify,
+                getattr(opts, "no_ml", False),
+                getattr(opts, "ml_model", None),
+                fedora_release=analyze_release,
+            )
+        except Exception as e:
+            logging.error("Failed to obtain SRPM: %s", e)
+            return 1
+
+        return cmd_analyze(
+            srpm_path, opts.server, opts.build_tag, opts.cert, opts.serverca, opts.no_ssl_verify
+        )
+
+    if opts.download_only:
+        package_name = opts.srpm or opts.target
+        if not package_name:
+            parser.error("--download-only requires package name")
+        dl_release = getattr(opts, "fedora_release", None) or "rawhide"
+        return cmd_download(
+            package_name,
+            opts.download_dir,
+            opts.no_ssl_verify,
+            no_ml=getattr(opts, "no_ml", False),
+            ml_model_path=getattr(opts, "ml_model", None),
+            fedora_release=dl_release,
+        )
+
+    # Resolve target and srpm from positional arguments:
+    #   vibebuild SRPM          -> target from ~/.koji/config
+    #   vibebuild TARGET SRPM   -> explicit target (backwards-compatible)
+    koji_cfg = load_koji_config()
+    if opts.target and opts.srpm:
+        target = opts.target
+        srpm_arg = opts.srpm
+    elif opts.target and not opts.srpm:
+        srpm_arg = opts.target
+        target = koji_cfg.get("target")
+    else:
+        target = None
+        srpm_arg = None
+
+    if not srpm_arg:
+        parser.error("SRPM (or package name) is required for building")
+
+    if not target:
+        parser.error(
+            "Build target not specified.\n"
+            "  Option 1: vibebuild TARGET PACKAGE\n"
+            "  Option 2: Add 'target = fedora-target' to ~/.koji/config under [koji]"
+        )
+
+    # Determine fedora_release: explicit flag > auto-detect from target > rawhide
+    fedora_release = getattr(opts, "fedora_release", None)
+    if not fedora_release:
+        fedora_release = detect_fedora_release(target)
+    if not fedora_release:
+        fedora_release = "rawhide"
+
+    try:
+        srpm_path = ensure_srpm_path(
+            srpm_arg,
+            opts.download_dir,
+            opts.no_ssl_verify,
+            getattr(opts, "no_ml", False),
+            getattr(opts, "ml_model", None),
+            fedora_release=fedora_release,
+        )
+    except Exception as e:
+        logging.error("Download failed: %s", e)
+        return 1
+
+    return cmd_build(
+        target=target,
+        srpm_path=srpm_path,
+        server=opts.server,
+        web_url=opts.web_url,
+        cert=opts.cert,
+        serverca=opts.serverca,
+        build_tag=opts.build_tag,
+        scratch=opts.scratch,
+        nowait=opts.nowait,
+        no_deps=opts.no_deps,
+        download_dir=opts.download_dir,
+        dry_run=opts.dry_run,
+        no_ssl_verify=opts.no_ssl_verify,
+        no_name_resolution=getattr(opts, "no_name_resolution", False),
+        no_ml=getattr(opts, "no_ml", False),
+        ml_model_path=getattr(opts, "ml_model", None),
+        fedora_release=fedora_release,
+    )
 
 
 if __name__ == "__main__":
