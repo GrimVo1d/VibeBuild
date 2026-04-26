@@ -1,0 +1,40 @@
+config_opts['root'] = 'koji'
+config_opts['target_arch'] = 'x86_64'
+config_opts['legal_host_arches'] = ('x86_64',)
+config_opts['chroot_setup_cmd'] = 'install @buildsys-build'
+config_opts['dist'] = 'fc40'
+config_opts['extra_chroot_dirs'] = [ '/run/lock', ]
+config_opts['releasever'] = '40'
+config_opts['package_manager'] = 'dnf'
+config_opts['nosync'] = True
+
+config_opts['dnf.conf'] = """
+[main]
+keepcache=1
+debuglevel=2
+reposdir=/dev/null
+logfile=/var/log/yum.log
+retries=20
+obsoletes=1
+gpgcheck=0
+assumeyes=1
+syslog_ident=mock
+syslog_device=
+install_weak_deps=0
+metadata_expire=0
+best=1
+module_platform_id=platform:f40
+protected_packages=
+
+[fedora]
+name=Fedora $releasever - $basearch
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-$releasever&arch=$basearch
+enabled=1
+gpgcheck=0
+
+[updates]
+name=Fedora $releasever - $basearch - Updates
+metalink=https://mirrors.fedoraproject.org/metalink?repo=updates-released-f$releasever&arch=$basearch
+enabled=1
+gpgcheck=0
+"""

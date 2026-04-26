@@ -1,0 +1,25 @@
+---
+- name: Install Koji Web packages
+  dnf:
+    name:
+      - koji-web
+      - python3-mod_wsgi
+    state: present
+
+- name: Configure Koji Web
+  template:
+    src: web.conf.j2
+    dest: /etc/kojiweb/web.conf
+    owner: root
+    group: apache
+    mode: '0640'
+  notify: Restart Apache
+
+- name: Configure Apache for Koji Web
+  template:
+    src: kojiweb.conf.j2
+    dest: /etc/httpd/conf.d/kojiweb.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Apache

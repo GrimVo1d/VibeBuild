@@ -1,0 +1,34 @@
+[kojid]
+sleeptime=5
+
+maxjobs=10
+
+topdir=/mnt/koji
+
+workdir=/var/tmp/koji
+
+mockdir=/var/lib/mock
+
+mockuser=kojibuilder
+
+mockhost=redhat-linux-gnu
+
+server=https://{{ koji_hub_fqdn }}/kojihub
+
+topurl=https://{{ koji_hub_fqdn }}/kojifiles
+
+use_createrepo_c=True
+
+cert = /etc/pki/koji/kojibuilder.pem
+
+serverca = /etc/pki/koji/koji_ca_cert.crt
+
+allowed_scms=:
+    src.fedoraproject.org:/*:no
+    pkgs.fedoraproject.org:/*:no
+    gitlab.com:/*:no
+    github.com:/*:no
+
+smtphost=localhost
+
+from_addr=Koji Build System <koji@{{ koji_hub_fqdn }}>

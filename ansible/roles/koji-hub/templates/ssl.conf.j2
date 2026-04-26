@@ -1,0 +1,37 @@
+Listen 443 https
+
+SSLPassPhraseDialog exec:/usr/libexec/httpd-ssl-pass-dialog
+SSLSessionCache         shmcb:/run/httpd/sslcache(512000)
+SSLSessionCacheTimeout  300
+SSLCryptoDevice builtin
+
+<VirtualHost _default_:443>
+    ServerName {{ koji_hub_fqdn }}:443
+    
+    ErrorLog logs/ssl_error_log
+    TransferLog logs/ssl_access_log
+    LogLevel warn
+    
+    SSLEngine on
+    SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1
+    SSLCipherSuite HIGH:!aNULL:!MD5
+    SSLHonorCipherOrder on
+    
+    SSLCertificateFile /etc/pki/koji/certs/{{ koji_hub_fqdn }}.crt
+    SSLCertificateKeyFile /etc/pki/koji/certs/{{ koji_hub_fqdn }}.key
+    SSLCertificateChainFile /etc/pki/koji/koji_ca_cert.crt
+    SSLCACertificateFile /etc/pki/koji/koji_ca_cert.crt
+    SSLVerifyClient optional
+    SSLVerifyDepth 10
+    
+    <FilesMatch "\.(cgi|shtml|phtml|php)$">
+        SSLOptions +StdEnvVars
+    </FilesMatch>
+    
+    BrowserMatch "MSIE [2-5]" \
+        nokeepalive ssl-unclean-shutdown \
+        downgrade-1.0 force-response-1.0
+    
+    CustomLog logs/ssl_request_log \
+        "%t %h %{SSL_PROTOCOL}x %{SSL_CIPHER}x \"%r\" %b"
+</VirtualHost>

@@ -1,0 +1,48 @@
+---
+- name: Install PostgreSQL
+  dnf:
+    name:
+      - postgresql-server
+      - postgresql-contrib
+      - python3-psycopg2
+    state: present
+
+- name: Check if PostgreSQL is initialized
+  stat:
+    path: /var/lib/pgsql/data/pg_hba.conf
+  register: postgres_data
+
+- name: Initialize PostgreSQL database
+  command: postgresql-setup --initdb
+  when: not postgres_data.stat.exists
+
+- name: Configure PostgreSQL authentication
+  template:
+    src: pg_hba.conf.j2
+    dest: /var/lib/pgsql/data/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  notify: Restart PostgreSQL
+
+- name: Start and enable PostgreSQL
+  systemd:
+    name: postgresql
+    state: started
+    enabled: yes
+
+- name: Create Koji database
+  become_user: postgres
+  postgresql_db:
+    name: "{{ postgresql_db }}"
+    encoding: UTF-8
+    state: present
+
+- name: Create Koji database user
+  become_user: postgres
+  postgresql_user:
+    db: "{{ postgresql_db }}"
+    name: "{{ postgresql_user }}"
+    password: "{{ postgresql_password }}"
+    priv: ALL
+    state: present

@@ -1,0 +1,23 @@
+Alias /kojihub /usr/share/koji-hub/kojixmlrpc.py
+
+<Directory "/usr/share/koji-hub">
+    Options ExecCGI
+    SetHandler wsgi-script
+    WSGIApplicationGroup %{GLOBAL}
+    Require all granted
+</Directory>
+
+Alias /kojifiles "/mnt/koji/"
+
+<Directory "/mnt/koji/">
+    Options Indexes SymLinksIfOwnerMatch
+    AllowOverride None
+    IndexOptions +NameWidth=*
+    Require all granted
+</Directory>
+
+<Location /kojihub/ssllogin>
+    SSLVerifyClient require
+    SSLVerifyDepth  10
+    SSLOptions +StdEnvVars
+</Location>

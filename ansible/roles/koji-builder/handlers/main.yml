@@ -1,0 +1,5 @@
+---
+- name: Restart Koji Builder
+  systemd:
+    name: kojid
+    state: restarted

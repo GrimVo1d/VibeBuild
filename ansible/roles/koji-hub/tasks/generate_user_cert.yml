@@ -1,0 +1,37 @@
+---
+- name: Generate user certificate key for {{ user_name }}
+  command: >
+    openssl genrsa -out /etc/pki/koji/certs/{{ user_name }}.key 2048
+  args:
+    creates: /etc/pki/koji/certs/{{ user_name }}.key
+
+- name: Generate user certificate request for {{ user_name }}
+  command: >
+    openssl req -new
+    -subj "/C={{ ssl_cert_country }}/ST={{ ssl_cert_state }}/L={{ ssl_cert_city }}/O={{ ssl_cert_org }}/OU={{ ssl_cert_ou }}/CN={{ user_name }}"
+    -key /etc/pki/koji/certs/{{ user_name }}.key
+    -out /etc/pki/koji/certs/{{ user_name }}.csr
+  args:
+    creates: /etc/pki/koji/certs/{{ user_name }}.csr
+
+- name: Sign user certificate for {{ user_name }}
+  command: >
+    openssl x509 -req -days 3650
+    -in /etc/pki/koji/certs/{{ user_name }}.csr
+    -CA /etc/pki/koji/koji_ca_cert.crt
+    -CAkey /etc/pki/koji/koji_ca_cert.key
+    -CAcreateserial
+    -out /etc/pki/koji/certs/{{ user_name }}.crt
+  args:
+    creates: /etc/pki/koji/certs/{{ user_name }}.crt
+
+- name: Create PEM bundle for {{ user_name }}
+  shell: |
+    cat /etc/pki/koji/certs/{{ user_name }}.crt /etc/pki/koji/certs/{{ user_name }}.key > /etc/pki/koji/{{ user_name }}.pem
+  args:
+    creates: /etc/pki/koji/{{ user_name }}.pem
+
+- name: Set permissions on {{ user_name }} certificate
+  file:
+    path: /etc/pki/koji/{{ user_name }}.pem
+    mode: '0600'

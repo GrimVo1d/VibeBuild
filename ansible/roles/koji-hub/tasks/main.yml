@@ -1,0 +1,123 @@
+---
+- name: Install Koji Hub packages
+  dnf:
+    name:
+      - koji-hub
+      - koji-hub-plugins
+      - httpd
+      - mod_ssl
+      - mod_wsgi
+      - python3-koji
+    state: present
+
+- name: Create Koji directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: apache
+    group: apache
+    mode: '0755'
+  loop:
+    - /mnt/koji
+    - /mnt/koji/packages
+    - /mnt/koji/repos
+    - /mnt/koji/work
+    - /mnt/koji/scratch
+    - /etc/pki/koji
+    - /etc/pki/koji/certs
+
+- name: Generate CA certificate
+  command: >
+    openssl req -new -x509 -days 3650 -nodes
+    -subj "/C={{ ssl_cert_country }}/ST={{ ssl_cert_state }}/L={{ ssl_cert_city }}/O={{ ssl_cert_org }}/OU={{ ssl_cert_ou }}/CN={{ koji_hub_fqdn }}"
+    -keyout /etc/pki/koji/koji_ca_cert.key
+    -out /etc/pki/koji/koji_ca_cert.crt
+  args:
+    creates: /etc/pki/koji/koji_ca_cert.crt
+
+- name: Generate server certificate key
+  command: >
+    openssl genrsa -out /etc/pki/koji/certs/{{ koji_hub_fqdn }}.key 2048
+  args:
+    creates: /etc/pki/koji/certs/{{ koji_hub_fqdn }}.key
+
+- name: Generate server certificate request
+  command: >
+    openssl req -new
+    -subj "/C={{ ssl_cert_country }}/ST={{ ssl_cert_state }}/L={{ ssl_cert_city }}/O={{ ssl_cert_org }}/OU={{ ssl_cert_ou }}/CN={{ koji_hub_fqdn }}"
+    -key /etc/pki/koji/certs/{{ koji_hub_fqdn }}.key
+    -out /etc/pki/koji/certs/{{ koji_hub_fqdn }}.csr
+  args:
+    creates: /etc/pki/koji/certs/{{ koji_hub_fqdn }}.csr
+
+- name: Sign server certificate
+  command: >
+    openssl x509 -req -days 3650
+    -in /etc/pki/koji/certs/{{ koji_hub_fqdn }}.csr
+    -CA /etc/pki/koji/koji_ca_cert.crt
+    -CAkey /etc/pki/koji/koji_ca_cert.key
+    -CAcreateserial
+    -out /etc/pki/koji/certs/{{ koji_hub_fqdn }}.crt
+  args:
+    creates: /etc/pki/koji/certs/{{ koji_hub_fqdn }}.crt
+
+- name: Generate admin user certificate
+  include_tasks: generate_user_cert.yml
+  vars:
+    user_name: "{{ koji_admin_user }}"
+
+- name: Configure Koji Hub
+  template:
+    src: hub.conf.j2
+    dest: /etc/koji-hub/hub.conf
+    owner: root
+    group: apache
+    mode: '0640'
+  notify: Restart Apache
+
+- name: Configure Apache for Koji Hub
+  template:
+    src: kojihub.conf.j2
+    dest: /etc/httpd/conf.d/kojihub.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Apache
+
+- name: Configure SSL for Apache
+  template:
+    src: ssl.conf.j2
+    dest: /etc/httpd/conf.d/ssl.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Apache
+
+- name: Import Koji database schema
+  become_user: postgres
+  shell: |
+    psql {{ postgresql_db }} < /usr/share/doc/koji*/docs/schema.sql
+  args:
+    creates: /var/lib/pgsql/.koji_schema_imported
+  register: schema_import
+
+- name: Mark schema as imported
+  file:
+    path: /var/lib/pgsql/.koji_schema_imported
+    state: touch
+  when: schema_import.changed
+
+- name: Configure firewall
+  firewalld:
+    port: "{{ item }}"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop: "{{ firewall_ports }}"
+  ignore_errors: yes
+
+- name: Start and enable Apache
+  systemd:
+    name: httpd
+    state: started
+    enabled: yes

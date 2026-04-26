@@ -1,0 +1,172 @@
+---
+- name: Wait for Koji Hub to be available
+  uri:
+    url: "https://{{ koji_hub_fqdn }}/koji"
+    validate_certs: no
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 5
+
+- name: Add admin user to Koji
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --weburl={{ koji_web_url }}
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-user {{ koji_admin_user }}
+  register: add_admin
+  failed_when: add_admin.rc != 0 and 'already exists' not in add_admin.stderr
+  changed_when: add_admin.rc == 0
+
+- name: Grant admin permissions
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    grant-permission admin {{ koji_admin_user }}
+  register: grant_admin
+  failed_when: grant_admin.rc != 0 and 'already has' not in grant_admin.stderr
+  changed_when: grant_admin.rc == 0
+
+- name: Add builder host to Koji
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-host {{ ansible_hostname }} x86_64
+  register: add_host
+  failed_when: add_host.rc != 0 and 'already exists' not in add_host.stderr
+  changed_when: add_host.rc == 0
+
+- name: Create destination tag
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-tag {{ koji_dest_tag }}
+  register: add_dest_tag
+  failed_when: add_dest_tag.rc != 0 and 'already exists' not in add_dest_tag.stderr
+  changed_when: add_dest_tag.rc == 0
+
+- name: Create build tag
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-tag {{ koji_build_tag }} --parent={{ koji_dest_tag }} --arches=x86_64
+  register: add_build_tag
+  failed_when: add_build_tag.rc != 0 and 'already exists' not in add_build_tag.stderr
+  changed_when: add_build_tag.rc == 0
+
+- name: Create build target
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-target {{ koji_target }} {{ koji_build_tag }} {{ koji_dest_tag }}
+  register: add_target
+  failed_when: add_target.rc != 0 and 'already exists' not in add_target.stderr
+  changed_when: add_target.rc == 0
+
+- name: Add external repositories
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-external-repo -t {{ koji_build_tag }} {{ item.name }} "{{ item.url }}"
+  loop: "{{ external_repos }}"
+  register: add_repo
+  failed_when: add_repo.rc != 0 and 'already exists' not in add_repo.stderr
+  changed_when: add_repo.rc == 0
+
+- name: Add build group
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-group {{ koji_build_tag }} build
+  register: add_group
+  failed_when: add_group.rc != 0 and 'already exists' not in add_group.stderr
+  changed_when: add_group.rc == 0
+
+- name: Add srpm-build group
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-group {{ koji_build_tag }} srpm-build
+  register: add_srpm_group
+  failed_when: add_srpm_group.rc != 0 and 'already exists' not in add_srpm_group.stderr
+  changed_when: add_srpm_group.rc == 0
+
+- name: Add packages to build group
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-group-pkg {{ koji_build_tag }} build {{ item }}
+  loop:
+    - bash
+    - bzip2
+    - coreutils
+    - cpio
+    - diffutils
+    - fedora-release
+    - findutils
+    - gawk
+    - glibc-minimal-langpack
+    - grep
+    - gzip
+    - info
+    - make
+    - patch
+    - redhat-rpm-config
+    - rpm-build
+    - sed
+    - shadow-utils
+    - tar
+    - unzip
+    - util-linux
+    - which
+    - xz
+  register: add_pkg
+  failed_when: add_pkg.rc != 0 and 'already' not in add_pkg.stderr
+  changed_when: add_pkg.rc == 0
+
+- name: Add packages to srpm-build group
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    add-group-pkg {{ koji_build_tag }} srpm-build {{ item }}
+  loop:
+    - bash
+    - fedora-release
+    - fedpkg-minimal
+    - gnupg2
+    - redhat-rpm-config
+    - rpm-build
+    - shadow-utils
+  register: add_srpm_pkg
+  failed_when: add_srpm_pkg.rc != 0 and 'already' not in add_srpm_pkg.stderr
+  changed_when: add_srpm_pkg.rc == 0
+
+- name: Regenerate repository
+  command: >
+    koji --server=https://{{ koji_hub_fqdn }}/kojihub
+    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
+    --serverca=/etc/pki/koji/koji_ca_cert.crt
+    regen-repo {{ koji_build_tag }}
+  async: 3600
+  poll: 30
+
+- name: Set default build target in koji client config
+  ini_file:
+    path: /etc/koji.conf
+    section: koji
+    option: target
+    value: "{{ koji_target }}"
+    create: yes
+  become: yes

@@ -1,0 +1,55 @@
+---
+- name: Install Koji Builder packages
+  dnf:
+    name:
+      - koji-builder
+      - mock
+      - rpm-build
+      - createrepo_c
+      - python3-koji
+    state: present
+
+- name: Add kojid user to mock group
+  user:
+    name: kojibuilder
+    groups: mock
+    append: yes
+
+- name: Generate builder certificate
+  include_tasks: "{{ playbook_dir }}/roles/koji-hub/tasks/generate_user_cert.yml"
+  vars:
+    user_name: "kojibuilder"
+
+- name: Configure Koji Builder
+  template:
+    src: kojid.conf.j2
+    dest: /etc/kojid/kojid.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Koji Builder
+
+- name: Create builder work directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: kojibuilder
+    group: kojibuilder
+    mode: '0755'
+  loop:
+    - /var/lib/kojid
+    - /var/tmp/koji
+
+- name: Configure mock
+  template:
+    src: mock-koji.cfg.j2
+    dest: /etc/mock/koji.cfg
+    owner: root
+    group: mock
+    mode: '0644'
+
+- name: Start and enable Koji Builder
+  systemd:
+    name: kojid
+    state: started
+    enabled: yes

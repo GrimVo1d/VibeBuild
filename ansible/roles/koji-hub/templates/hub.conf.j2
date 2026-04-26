@@ -1,0 +1,32 @@
+[hub]
+DBName = {{ postgresql_db }}
+DBUser = {{ postgresql_user }}
+DBPass = {{ postgresql_password }}
+DBHost = 127.0.0.1
+
+KojiDir = /mnt/koji
+
+AuthPrincipal = host/{{ koji_hub_fqdn }}@EXAMPLE.COM
+
+LoginCreatesUser = On
+KojiWebURL = {{ koji_web_url }}
+KojiFilesURL = {{ koji_files_url }}
+
+DNUsernameComponent = CN
+ProxyDNs = /C={{ ssl_cert_country }}/ST={{ ssl_cert_state }}/L={{ ssl_cert_city }}/O={{ ssl_cert_org }}/OU={{ ssl_cert_ou }}/CN={{ koji_hub_fqdn }}
+
+Plugins = hub_containerbuild
+PluginPath = /usr/lib/koji-hub-plugins
+
+NotifyOnSuccess = True
+DisableNotifications = False
+
+CheckClientIP = False
+
+LockOut = False
+
+MaxRequestLength = 167772160
+MemoryWarnThreshold = 5000
+ImageRoot = /mnt/koji/images
+EnableMaven = False
+EnableWin = False

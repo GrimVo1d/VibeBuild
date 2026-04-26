@@ -1,0 +1,34 @@
+---
+koji_hub_fqdn: "koji.internal"
+koji_web_url: "https://{{ koji_hub_fqdn }}/koji"
+koji_files_url: "https://{{ koji_hub_fqdn }}/kojifiles"
+
+postgresql_db: "koji"
+postgresql_user: "koji"
+postgresql_password: "{{ vault_postgresql_password | default('changeme') }}"
+
+koji_admin_user: "kojiadmin"
+koji_admin_email: "admin@example.internal"
+
+ssl_cert_country: "XX"
+ssl_cert_state: "State"
+ssl_cert_city: "City"
+ssl_cert_org: "VibeBuild"
+ssl_cert_ou: "Build System"
+
+koji_build_tag: "f42-build"
+koji_dest_tag: "f42"
+koji_target: "f42"
+
+external_repos:
+  - name: "fedora-base"
+    url: "https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch"
+  - name: "fedora-updates"
+    url: "https://mirrors.fedoraproject.org/mirrorlist?repo=updates-released-f$releasever&arch=$basearch"
+
+mock_chroot: "fedora-42-x86_64"
+
+firewall_ports:
+  - 80/tcp
+  - 443/tcp
+  - 5432/tcp

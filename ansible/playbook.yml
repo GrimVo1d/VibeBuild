@@ -1,0 +1,36 @@
+---
+- name: Deploy Koji Build System
+  hosts: koji
+  become: yes
+  
+  pre_tasks:
+    - name: Update system packages
+      dnf:
+        name: "*"
+        state: latest
+      tags: [setup]
+
+    - name: Install EPEL repository (if needed)
+      dnf:
+        name: epel-release
+        state: present
+      ignore_errors: yes
+      tags: [setup]
+
+  roles:
+    - role: postgresql
+      tags: [database]
+    - role: koji-hub
+      tags: [hub]
+    - role: koji-builder
+      tags: [builder]
+    - role: koji-web
+      tags: [web]
+    - role: koji-init
+      tags: [init]
+
+  post_tasks:
+    - name: Display Koji Web URL
+      debug:
+        msg: "Koji Web UI available at: {{ koji_web_url }}"
+      tags: [always]
