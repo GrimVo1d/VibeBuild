@@ -1,0 +1,7 @@
+[
+  {"provide": "python3", "rpm_name": "python3.14", "srpm_name": "python3.14"},
+  {"provide": "python3.13", "rpm_name": "python3.13", "srpm_name": "python3.13"},
+  {"provide": "python3.12", "rpm_name": "python3.12", "srpm_name": "python3.12"},
+  {"provide": "python3.11", "rpm_name": "python3.11", "srpm_name": "python3.11"},
+  {"provide": "python3.10", "rpm_name": "python3.10", "srpm_name": "python3.10"}
+]
