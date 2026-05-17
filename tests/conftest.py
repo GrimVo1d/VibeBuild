@@ -90,6 +90,22 @@ def mock_subprocess_run(mocker):
     return mock
 
 
+@pytest.fixture
+def mock_subprocess_popen(mocker):
+    """Mock subprocess.Popen for analyzer's rpm2cpio | cpio pipeline."""
+    mock_popen_cls = mocker.patch("subprocess.Popen")
+
+    def _make_proc(*args, **kwargs):
+        proc = Mock()
+        proc.returncode = 0
+        proc.communicate.return_value = (b"", b"")
+        proc.stdout = Mock()
+        proc.stdout.close = Mock()
+        return proc
+
+    mock_popen_cls.side_effect = _make_proc
+    return mock_popen_cls
+
 
 @pytest.fixture
 def mock_requests(mocker):

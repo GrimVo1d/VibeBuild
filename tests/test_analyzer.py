@@ -252,12 +252,11 @@ gcc
 
 
 class TestGetPackageInfoFromSrpm:
-    def test_extracts_package_info(self, tmp_path, mock_subprocess_run, sample_spec_content):
+    def test_extracts_package_info(self, tmp_path, mock_subprocess_popen, sample_spec_content):
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
         spec_file = tmp_path / "test-package.spec"
         spec_file.write_text(sample_spec_content)
-        mock_subprocess_run.return_value.returncode = 0
 
         with patch("vibebuild.analyzer.tempfile.TemporaryDirectory") as mock_tmpdir:
             mock_tmpdir.return_value.__enter__ = Mock(return_value=str(tmp_path))
@@ -271,10 +270,9 @@ class TestGetPackageInfoFromSrpm:
         with pytest.raises(FileNotFoundError):
             get_package_info_from_srpm("/nonexistent/file.src.rpm")
 
-    def test_raises_when_no_spec_found(self, tmp_path, mock_subprocess_run):
+    def test_raises_when_no_spec_found(self, tmp_path, mock_subprocess_popen):
         srpm = tmp_path / "empty.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
 
         with patch("vibebuild.analyzer.tempfile.TemporaryDirectory") as mock_tmpdir:
             empty_dir = tmp_path / "empty_extract"

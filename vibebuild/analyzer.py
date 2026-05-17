@@ -2,6 +2,7 @@
 SRPM and spec file analyzer for extracting BuildRequires.
 """
 
+import os
 import re
 import subprocess
 import tempfile
@@ -292,9 +293,7 @@ def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
         raise FileNotFoundError(f"SRPM not found: {srpm_path}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        subprocess.run(
-            f"rpm2cpio {srpm_path} | cpio -idmv", shell=True, cwd=tmpdir, capture_output=True
-        )
+        _extract_srpm(srpm_path, tmpdir)
 
         spec_files = list(Path(tmpdir).glob("*.spec"))
         if not spec_files:
@@ -302,3 +301,43 @@ def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
 
         analyzer = SpecAnalyzer()
         return analyzer.analyze_spec(str(spec_files[0]))
+
+
+def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:
+    """Unpack an SRPM into dest_dir via rpm2cpio | cpio -idm (without a shell)."""
+    with open(os.devnull, "wb") as devnull:
+        p1 = subprocess.Popen(
+            ["rpm2cpio", str(srpm_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        p2 = subprocess.Popen(
+            ["cpio", "-idm"],
+            stdin=p1.stdout,
+            stdout=devnull,
+            stderr=subprocess.PIPE,
+            cwd=dest_dir,
+        )
+        # Close the pipe in the parent so that p2 gets EOF
+        assert p1.stdout is not None
+        p1.stdout.close()
+        try:
+            _, cpio_err = p2.communicate(timeout=120)
+            _, rpm2cpio_err = p1.communicate(timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            p1.kill()
+            p2.kill()
+            raise InvalidSRPMError(
+                f"Unpacking SRPM {srpm_path} timed out"
+            ) from exc
+
+    if p1.returncode != 0:
+        raise InvalidSRPMError(
+            f"rpm2cpio failed for {srpm_path}: "
+            f"{rpm2cpio_err.decode(errors='replace').strip()}"
+        )
+    if p2.returncode != 0:
+        raise InvalidSRPMError(
+            f"cpio failed to unpack {srpm_path}: "
+            f"{cpio_err.decode(errors='replace').strip()}"
+        )
