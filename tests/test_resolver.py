@@ -747,3 +747,64 @@ class TestDependencyResolverExternalRepos:
         ])
 
         assert result == []
+
+
+class TestVersionConstraints:
+    """Tests for the version check in find_missing_deps."""
+
+    @pytest.mark.parametrize(
+        "actual,required_op,required_ver,expected_missing",
+        [
+            ("1.17.0", ">=", "1.12", False),
+            ("1.10.0", ">=", "1.12", True),
+            ("1.12.0", ">=", "1.12", False),
+            ("2.0", ">", "1.99", False),
+            ("1.99", ">", "1.99", True),
+            ("1.12", "=", "1.12", False),
+            ("1.13", "=", "1.12", True),
+            ("1.0", "<", "1.5", False),
+            ("2.0", "<", "1.5", True),
+            ("3.0", "<=", "3.0", False),
+            ("3.1", "<=", "3.0", True),
+        ],
+    )
+    def test_find_missing_deps_version_check(
+        self, mock_koji_client, actual, required_op, required_ver, expected_missing
+    ):
+        mock_koji_client.list_packages.return_value = ["python3-cffi"]
+        mock_koji_client.package_exists.return_value = True
+        mock_koji_client.latest_build.return_value = {
+            "nvr": f"python3-cffi-{actual}-1.fc42",
+            "version": actual,
+            "release": "1.fc42",
+        }
+        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
+        dep = BuildRequirement(name="python3-cffi", version=required_ver, operator=required_op)
+
+        result = resolver.find_missing_deps([dep])
+
+        if expected_missing:
+            assert "python3-cffi" in result
+        else:
+            assert "python3-cffi" not in result
+
+    def test_no_constraint_passes_without_check(self, mock_koji_client):
+        """Without operator/version, latest_build must not be called."""
+        mock_koji_client.list_packages.return_value = ["gcc"]
+        mock_koji_client.package_exists.return_value = True
+        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
+
+        result = resolver.find_missing_deps([BuildRequirement(name="gcc")])
+
+        assert result == []
+        mock_koji_client.latest_build.assert_not_called()
+
+    def test_latest_build_none_is_optimistic(self, mock_koji_client):
+        """If latest_build returned None, the version check is considered passed."""
+        mock_koji_client.list_packages.return_value = ["python3-cffi"]
+        mock_koji_client.package_exists.return_value = True
+        mock_koji_client.latest_build.return_value = None
+        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
+        dep = BuildRequirement(name="python3-cffi", version="1.12", operator=">=")
+
+        assert "python3-cffi" not in resolver.find_missing_deps([dep])

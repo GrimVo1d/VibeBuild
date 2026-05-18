@@ -15,6 +15,55 @@ from vibebuild.exceptions import CircularDependencyError, KojiConnectionError
 
 logger = logging.getLogger(__name__)
 
+try:
+    import rpm as _rpm  # type: ignore
+
+    HAS_RPM = True
+except ImportError:  # pragma: no cover - rpm may be missing on a macOS host
+    HAS_RPM = False
+
+
+def _compare_versions(a: tuple[str, str, str], b: tuple[str, str, str]) -> int:
+    """
+    Compare (epoch, version, release). Uses rpm.labelCompare if available,
+    otherwise does a good enough comparison via string tuples.
+    """
+    if HAS_RPM:
+        return _rpm.labelCompare(a, b)
+    # Fallback: character by character on version, then on release; epoch as a number
+    ea = int(a[0] or "0")
+    eb = int(b[0] or "0")
+    if ea != eb:
+        return (ea > eb) - (ea < eb)
+    for x, y in ((a[1], b[1]), (a[2], b[2])):
+        if x == y:
+            continue
+        # Compare tokens split into digits/letters
+        import re as _re
+
+        xa = _re.findall(r"\d+|[A-Za-z]+", x)
+        ya = _re.findall(r"\d+|[A-Za-z]+", y)
+        for xs, ys in zip(xa, ya):
+            if xs.isdigit() and ys.isdigit():
+                ix, iy = int(xs), int(ys)
+                if ix != iy:
+                    return (ix > iy) - (ix < iy)
+            elif xs != ys:
+                return (xs > ys) - (xs < ys)
+        if len(xa) != len(ya):
+            return (len(xa) > len(ya)) - (len(xa) < len(ya))
+    return 0
+
+
+_OP_FN = {
+    ">=": lambda c: c >= 0,
+    ">": lambda c: c > 0,
+    "=": lambda c: c == 0,
+    "==": lambda c: c == 0,
+    "<=": lambda c: c <= 0,
+    "<": lambda c: c < 0,
+}
+
 
 @dataclass
 class DependencyNode:
@@ -118,6 +167,27 @@ class KojiClient:
         result = self._run_koji_command("list-tagged", tag, package, "--quiet", "--inherit")
         return bool(result.stdout.strip())
 
+    def latest_build(self, package: str, tag: str) -> Optional[dict[str, str]]:
+        """
+        Return the NVR and parsed version/release of the latest build of a package in the tag.
+
+        Returns:
+            {"nvr": "...", "version": "...", "release": "..."} or None if there is no build.
+        """
+        result = self._run_koji_command(
+            "list-tagged", tag, package, "--quiet", "--inherit", "--latest"
+        )
+        if result.returncode != 0:
+            return None
+        line = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
+        if not line:
+            return None
+        nvr = line.split()[0]
+        # Parse NVR from the end: <release> (maybe with dist suffix), <version>, rest is the name
+        parts = nvr.rsplit("-", 2)
+        if len(parts) < 3:
+            return None
+        return {"nvr": nvr, "version": parts[-2], "release": parts[-1]}
 
     def has_external_repos(self, tag: str) -> bool:
         """Check if a tag has external repos configured."""
@@ -182,6 +252,48 @@ class DependencyResolver:
                 self._has_external_repos = False
         return self._has_external_repos
 
+    def _version_ok(
+        self,
+        package: str,
+        required_op: Optional[str],
+        required_ver: Optional[str],
+    ) -> bool:
+        """
+        Check that the latest build of a package satisfies required_op required_ver.
+
+        Without a constraint (op/ver = None) it is always True. If the latest build
+        could not be fetched, optimistically return True so as not to block
+        the build because of temporary Koji unavailability.
+        """
+        if not required_op or not required_ver:
+            return True
+        try:
+            latest = self.koji.latest_build(package, self.koji_tag)
+        except Exception as exc:
+            logger.debug("Failed to get latest_build for %s: %s", package, exc)
+            return True
+        if not latest:
+            return True
+        # required_ver may contain a release ("1.12-2"); if not, there is no need to compare release
+        if "-" in required_ver:
+            ver_part, rel_part = required_ver.split("-", 1)
+            actual = ("0", latest["version"], latest["release"])
+            wanted = ("0", ver_part, rel_part)
+        else:
+            # Compare only version, set the release to the same value
+            ver_part = required_ver
+            actual = ("0", latest["version"], "0")
+            wanted = ("0", ver_part, "0")
+        cmp_fn = _OP_FN.get(required_op)
+        if cmp_fn is None:
+            return True
+        result = cmp_fn(_compare_versions(actual, wanted))
+        if not result:
+            logger.debug(
+                "version check fail: %s has %s but requires %s %s",
+                package, latest["nvr"], required_op, required_ver,
+            )
+        return result
 
     def _is_our_package(self, package_name: str) -> bool:
         """Check if a package is registered in our local Koji.
@@ -224,6 +336,8 @@ class DependencyResolver:
 
         for dep in deps:
             name = dep.name if isinstance(dep, BuildRequirement) else dep
+            required_op = dep.operator if isinstance(dep, BuildRequirement) else None
+            required_ver = dep.version if isinstance(dep, BuildRequirement) else None
 
             # Normalize the name using resolver
             resolved_name = name
@@ -231,9 +345,23 @@ class DependencyResolver:
                 resolved_name = self.name_resolver.resolve(name)
 
             if resolved_name in self.available_packages:
+                if self._version_ok(resolved_name, required_op, required_ver):
+                    continue
+                logger.info(
+                    "  %s: version constraint %s %s is not satisfied by the current build",
+                    resolved_name, required_op, required_ver,
+                )
+                missing.append(resolved_name)
                 continue
 
             if self.koji.package_exists(resolved_name, self.koji_tag):
+                if self._version_ok(resolved_name, required_op, required_ver):
+                    continue
+                logger.info(
+                    "  %s: version constraint %s %s is not satisfied",
+                    resolved_name, required_op, required_ver,
+                )
+                missing.append(resolved_name)
                 continue
 
             # Also try original name if different from resolved
