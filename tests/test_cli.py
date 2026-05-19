@@ -520,7 +520,7 @@ class TestMain:
             with patch("vibebuild.cli.setup_logging") as mock_logging:
                 result = main(["-v", "target", str(srpm)])
 
-        mock_logging.assert_called_with(True, False)
+        mock_logging.assert_called_with(True, False, json_logs=False)
 
     def test_main_quiet_sets_logging(self, tmp_path):
         srpm = tmp_path / "test.src.rpm"
@@ -531,7 +531,7 @@ class TestMain:
             with patch("vibebuild.cli.setup_logging") as mock_logging:
                 result = main(["-q", "target", str(srpm)])
 
-        mock_logging.assert_called_with(False, True)
+        mock_logging.assert_called_with(False, True, json_logs=False)
 
 
 class TestLoadKojiConfig:

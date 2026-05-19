@@ -7,6 +7,16 @@ from pathlib import Path
 from unittest.mock import Mock
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    """Do not sleep in the retry decorator during tests (otherwise the suite takes minutes)."""
+    try:
+        import vibebuild._retry as _r
+
+        monkeypatch.setattr(_r.time, "sleep", lambda _s: None)
+    except ImportError:
+        pass
+
 
 @pytest.fixture
 def fixtures_dir():

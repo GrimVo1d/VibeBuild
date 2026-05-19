@@ -141,6 +141,20 @@ def main() -> None:
         action="store_true",
         help="Skip evaluation on test set (faster; model is still saved)",
     )
+    parser.add_argument(
+        "--eval-sample",
+        type=int,
+        default=1000,
+        help="Maximum number of test samples to evaluate (random subset). "
+             "Brute-force cosine on >10k samples is impractically slow. "
+             "Use 0 to evaluate all (very slow on large datasets).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for train/test split and eval sampling",
+    )
     args = parser.parse_args()
 
     # Load data
@@ -148,8 +162,12 @@ def main() -> None:
     data = load_training_data(args.input)
     logger.info("Loaded %d entries", len(data))
 
-    # Split data
+    # Split data (shuffle deterministically first so that test_data is a random slice)
+    import random
+    rng = random.Random(args.seed)
     if args.test_split > 0 and len(data) > 10:
+        data = list(data)
+        rng.shuffle(data)
         split_idx = max(1, int(len(data) * (1 - args.test_split)))
         train_data = data[:split_idx]
         test_data = data[split_idx:]
@@ -194,8 +212,17 @@ def main() -> None:
 
     # Evaluate on test set
     if test_data and not args.skip_eval:
+        eval_data = test_data
+        if args.eval_sample and len(test_data) > args.eval_sample:
+            eval_data = rng.sample(test_data, args.eval_sample)
+            logger.info(
+                "Evaluating on %d random samples (of %d test entries)",
+                len(eval_data), len(test_data),
+            )
         logger.info("--- Evaluation on test set ---")
-        metrics = evaluate_model(resolver, test_data)
+        eval_start = time.time()
+        metrics = evaluate_model(resolver, eval_data)
+        logger.info("Evaluation took %.2f seconds", time.time() - eval_start)
         logger.info("Test samples:    %d", metrics["total"])
         logger.info("Predictions:     %d (coverage: %.1f%%)", metrics["predicted"],
                      metrics["coverage"] * 100)

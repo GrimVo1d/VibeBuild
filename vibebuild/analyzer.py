@@ -278,29 +278,52 @@ def get_build_requires(srpm_path: str) -> list[str]:
         return requires
 
 
-def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
+def get_package_info_from_srpm(srpm_path: str, use_cache: bool = True) -> PackageInfo:
     """
     Extract full package information from SRPM.
 
     Args:
         srpm_path: Path to .src.rpm file
+        use_cache: use the persistent parse cache (default True).
+                    If the cache hits, skip rpm2cpio/cpio/parse.
 
     Returns:
         PackageInfo with all extracted data
     """
-    srpm_path = Path(srpm_path)
-    if not srpm_path.exists():
+    srpm_path_obj = Path(srpm_path)
+    if not srpm_path_obj.exists():
         raise FileNotFoundError(f"SRPM not found: {srpm_path}")
 
+    if use_cache:
+        try:
+            from vibebuild import _spec_cache
+
+            cached = _spec_cache.get(str(srpm_path_obj))
+            if cached is not None:
+                return cached
+        except Exception:
+            # any cache problem must not break the main work
+            pass
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        _extract_srpm(srpm_path, tmpdir)
+        _extract_srpm(srpm_path_obj, tmpdir)
 
         spec_files = list(Path(tmpdir).glob("*.spec"))
         if not spec_files:
-            raise InvalidSRPMError(f"No spec file found in SRPM: {srpm_path}")
+            raise InvalidSRPMError(f"No spec file found in SRPM: {srpm_path_obj}")
 
         analyzer = SpecAnalyzer()
-        return analyzer.analyze_spec(str(spec_files[0]))
+        info = analyzer.analyze_spec(str(spec_files[0]))
+
+    if use_cache:
+        try:
+            from vibebuild import _spec_cache
+
+            _spec_cache.put(str(srpm_path_obj), info)
+        except Exception:
+            pass
+
+    return info
 
 
 def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:

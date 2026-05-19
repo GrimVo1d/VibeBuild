@@ -261,7 +261,7 @@ class TestGetPackageInfoFromSrpm:
         with patch("vibebuild.analyzer.tempfile.TemporaryDirectory") as mock_tmpdir:
             mock_tmpdir.return_value.__enter__ = Mock(return_value=str(tmp_path))
             mock_tmpdir.return_value.__exit__ = Mock(return_value=False)
-            result = get_package_info_from_srpm(str(srpm))
+            result = get_package_info_from_srpm(str(srpm), use_cache=False)
 
         assert result.name == "test-package"
         assert result.version == "1.0"
@@ -281,7 +281,7 @@ class TestGetPackageInfoFromSrpm:
             mock_tmpdir.return_value.__exit__ = Mock(return_value=False)
 
             with pytest.raises(InvalidSRPMError, match="No spec file found"):
-                get_package_info_from_srpm(str(srpm))
+                get_package_info_from_srpm(str(srpm), use_cache=False)
 
 
 class TestSpecAnalyzerEdgeCases:

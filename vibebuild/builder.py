@@ -20,6 +20,24 @@ from vibebuild.resolver import DependencyResolver, KojiClient
 logger = logging.getLogger(__name__)
 
 
+def _adaptive_poll_interval(elapsed_s: float, max_interval: int = 30) -> float:
+    """
+    Returns the interval between poll requests depending on how long the
+    build has been running. Short builds react quickly, long ones save
+    requests to Koji.
+
+    Profile:
+      0 - 30s   ->  2 seconds
+      30 - 180s ->  10 seconds
+      > 180s    ->  max_interval (default 30)
+    """
+    if elapsed_s < 30:
+        return min(2.0, max_interval)
+    if elapsed_s < 180:
+        return min(10.0, max_interval)
+    return float(max_interval)
+
+
 class BuildStatus(Enum):
     """Status of a build task."""
 
@@ -28,6 +46,7 @@ class BuildStatus(Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     CANCELED = "canceled"
+    ALREADY_BUILT = "already_built"  # idempotency skip
 
 
 @dataclass
@@ -83,6 +102,8 @@ class KojiBuilder:
         no_ml: bool = False,
         ml_model_path: Optional[str] = None,
         fedora_release: str = "rawhide",
+        force: bool = False,
+        idempotent: bool = False,
     ):
         self.koji_server = koji_server
         self.koji_web_url = koji_web_url
@@ -93,6 +114,8 @@ class KojiBuilder:
         self.scratch = scratch
         self.nowait = nowait
         self.no_ssl_verify = no_ssl_verify
+        self.force = force            # disable the idempotency skip
+        self.idempotent = idempotent  # enable the idempotency pre-check (off by default)
 
         self.koji_client = KojiClient(
             server=koji_server,
@@ -188,6 +211,29 @@ class KojiBuilder:
             nvr=package_info.nvr,
         )
 
+        # Idempotency: if the target tag already has a fresh build with this NVR,
+        # do not submit again, return ALREADY_BUILT. Enabled via
+        # `idempotent=True` in __init__ (the CLI sets it by default).
+        # The skip is disabled via self.force.
+        if (
+            getattr(self, "idempotent", False)
+            and not getattr(self, "force", False)
+            and not self.scratch
+        ):
+            try:
+                latest = self.koji_client.latest_build(
+                    package_info.name, self.target
+                )
+                if latest and latest.get("nvr") == package_info.nvr:
+                    logger.info(
+                        "  %s already built in %s (NVR=%s), skipping",
+                        package_info.name, self.target, latest["nvr"],
+                    )
+                    task.status = BuildStatus.ALREADY_BUILT
+                    return task
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("idempotency check skipped: %s", exc)
+
         # Ensure the package is registered in the destination tag
         dest_tag = self.target  # e.g. "f42"
         add_result = self._run_koji(
@@ -256,7 +302,12 @@ class KojiBuilder:
         return task
 
     def _poll_build(self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30) -> BuildStatus:
-        """Poll a build task with progress logging."""
+        """Poll a build task with progress logging.
+
+        `interval` is accepted as the maximum interval; the real interval is
+        adaptive: short at the start (quick reaction to fast builds),
+        growing over time (saves requests to koji on long builds).
+        """
         start = time.time()
         last_state = ""
 
@@ -264,7 +315,7 @@ class KojiBuilder:
             result = self._run_koji("taskinfo", str(task_id), timeout=120)
             if result.returncode != 0:
                 logger.warning(f"  [{nvr}] Could not get task info")
-                time.sleep(interval)
+                time.sleep(_adaptive_poll_interval(time.time() - start, interval))
                 continue
 
             output = result.stdout
@@ -308,7 +359,7 @@ class KojiBuilder:
             elif state == "canceled":
                 return BuildStatus.CANCELED
 
-            time.sleep(interval)
+            time.sleep(_adaptive_poll_interval(elapsed, interval))
 
         logger.error(f"  [{nvr}] Build timed out after {timeout}s")
         return BuildStatus.FAILED
@@ -355,11 +406,11 @@ class KojiBuilder:
                 del pending[tid]
 
             if pending:
-                elapsed = int(time.time() - start)
-                minutes, seconds = divmod(elapsed, 60)
+                elapsed_s = time.time() - start
+                minutes, seconds = divmod(int(elapsed_s), 60)
                 names = ", ".join(t.package_name for t in pending.values())
                 logger.info(f"  [{minutes}m{seconds:02d}s] Waiting for: {names}")
-                time.sleep(interval)
+                time.sleep(_adaptive_poll_interval(elapsed_s, interval))
 
         # Timeout remaining tasks
         for task in pending.values():

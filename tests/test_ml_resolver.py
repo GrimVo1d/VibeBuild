@@ -63,7 +63,7 @@ def mock_sklearn(mocker):
     mocker.patch("vibebuild.ml_resolver.NearestNeighbors", mock_nn_cls, create=True)
 
     mock_joblib = MagicMock()
-    def joblib_dump(data, path):
+    def joblib_dump(data, path, **kwargs):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text("mock model")
     mock_joblib.dump.side_effect = joblib_dump
@@ -116,6 +116,8 @@ def empty_resolver():
     resolver._model_loaded = False
     resolver._cache = {}
     resolver._cache_dirty = False
+    # tried to load, found nothing blocks lazy-load in _ensure_loaded
+    resolver._load_attempted = True
     return resolver
 
 
@@ -301,6 +303,8 @@ class TestMLPackageResolverIsAvailable:
         resolver._model_loaded = False
         resolver._cache = {}
         resolver._cache_dirty = False
+        # tried, found nothing so that the first is_available returns False without lazy-load
+        resolver._load_attempted = True
 
         assert resolver.is_available() is False
 

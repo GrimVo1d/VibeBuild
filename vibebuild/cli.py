@@ -90,8 +90,15 @@ def create_name_resolver(
     return PackageNameResolver(ml_resolver=ml_resolver)
 
 
-def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
-    """Configure logging based on verbosity."""
+def setup_logging(
+    verbose: bool = False,
+    quiet: bool = False,
+    json_logs: bool = False,
+) -> None:
+    """Configure logging based on verbosity.
+
+    json_logs=True switches to the JSON format for prod parsing.
+    """
     if quiet:
         level = logging.WARNING
     elif verbose:
@@ -99,9 +106,21 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
     else:
         level = logging.INFO
 
-    logging.basicConfig(
-        level=level, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
-    )
+    handler = logging.StreamHandler()
+    if json_logs:
+        from vibebuild._logging import JsonFormatter
+
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"
+            )
+        )
+
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(level)
 
 
 class _HelpAllArgumentParser(argparse.ArgumentParser):
@@ -190,6 +209,13 @@ Examples:
 
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress non-error output")
 
+    parser.add_argument(
+        "--log-format",
+        choices=("text", "json"),
+        default="text",
+        help="Log format: text (default) or json for prod parsers",
+    )
+
     koji_group = parser.add_argument_group("Koji options")
 
     koji_group.add_argument(
@@ -247,6 +273,14 @@ Examples:
         "--no-deps", action="store_true", help="Skip dependency resolution, just build the package"
     )
 
+    build_group.add_argument(
+        "--force", action="store_true",
+        help="Rebuild the package even if an identical NVR is already in the target tag",
+    )
+    build_group.add_argument(
+        "--no-idempotency", action="store_true",
+        help="Disable the idempotency pre-check (by default vibebuild skips already built packages)",
+    )
 
     build_group.add_argument("--download-dir", metavar="DIR", help="Directory for downloaded SRPMs")
 
@@ -461,6 +495,8 @@ def cmd_build(
     no_ml: bool = False,
     ml_model_path: Optional[str] = None,
     fedora_release: str = "rawhide",
+    force: bool = False,
+    no_idempotency: bool = False,
 ) -> int:
     """Build package with dependency resolution."""
     srpm = Path(srpm_path)
@@ -483,6 +519,8 @@ def cmd_build(
         no_ml=no_ml,
         ml_model_path=ml_model_path,
         fedora_release=fedora_release,
+        force=force,
+        idempotent=not no_idempotency,
     )
 
     if dry_run:
@@ -552,7 +590,7 @@ def main(args: Optional[list[str]] = None) -> int:
         print(parser.format_help())
         return 0
 
-    setup_logging(opts.verbose, opts.quiet)
+    setup_logging(opts.verbose, opts.quiet, json_logs=(opts.log_format == "json"))
 
     if opts.no_ssl_verify:
         import urllib3
@@ -660,6 +698,8 @@ def main(args: Optional[list[str]] = None) -> int:
         no_ml=getattr(opts, "no_ml", False),
         ml_model_path=getattr(opts, "ml_model", None),
         fedora_release=fedora_release,
+        force=getattr(opts, "force", False),
+        no_idempotency=getattr(opts, "no_idempotency", False),
     )
 
 
