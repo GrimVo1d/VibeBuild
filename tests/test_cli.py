@@ -872,3 +872,33 @@ class TestMainEdgeCases:
         assert result == 0
         mock_cmd.assert_called_once()
         assert mock_cmd.call_args.kwargs["target"] == "explicit-target"
+
+
+class TestTrainSubcommand:
+    """The vibebuild train subcommand."""
+
+    def test_train_help_exits_zero(self, capsys):
+        """vibebuild train --help prints usage and exits via SystemExit(0)."""
+        with pytest.raises(SystemExit) as exc_info:
+            main(["train", "--help"])
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "vibebuild train" in out
+        assert "--release" in out
+
+    def test_train_calls_collect_and_train(self, mocker):
+        """vibebuild train calls vibebuild.training.collect_and_train with the CLI parameters."""
+        mock_cat = mocker.patch(
+            "vibebuild.training.collect_and_train",
+            return_value={
+                "train_size": 100, "test_size": 10,
+                "predicted": 9, "coverage": 0.9,
+                "rpm_accuracy": 0.5, "srpm_accuracy": 0.7,
+            },
+        )
+        rc = main(["train", "--release", "42", "--output", "/tmp/m.joblib"])
+        assert rc == 0
+        mock_cat.assert_called_once()
+        kwargs = mock_cat.call_args.kwargs
+        assert kwargs["release"] == 42
+        assert kwargs["output"] == "/tmp/m.joblib"

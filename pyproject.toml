@@ -14,6 +14,8 @@ authors = [
 keywords = ["koji", "rpm", "srpm", "build", "fedora", "dependency"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -38,21 +40,32 @@ dev = [
     "isort>=5.12",
     "mypy>=1.0",
     "flake8>=6.0",
-    "pre-commit>=3.0",
 ]
 
 [project.scripts]
 vibebuild = "vibebuild.cli:main"
 
-[project.urls]
-Homepage = "https://github.com/vibebuild/vibebuild"
-Documentation = "https://github.com/vibebuild/vibebuild/docs"
-Repository = "https://github.com/vibebuild/vibebuild"
-Issues = "https://github.com/vibebuild/vibebuild/issues"
+[tool.setuptools.packages.find]
+include = ["vibebuild*"]
+exclude = ["tests*", "dev*", "ansible*", "scripts*", "docs*"]
+
+[tool.setuptools.package-data]
+vibebuild = ["data/*.json", "data/*.joblib"]
 
 [tool.black]
 line-length = 100
 target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.mypy_cache
+  | \.pytest_cache
+  | \.venv
+  | build
+  | dist
+)/
+'''
 
 [tool.isort]
 profile = "black"
@@ -74,3 +87,11 @@ addopts = "-v --cov=vibebuild --cov-report=term-missing"
 [tool.coverage.run]
 source = ["vibebuild"]
 branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

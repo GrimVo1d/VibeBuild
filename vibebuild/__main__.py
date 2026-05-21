@@ -1,5 +1,5 @@
-"""Allow `python -m vibebuild`."""
+"""Allow running vibebuild as ``python -m vibebuild``."""
 from vibebuild.cli import main
+import sys
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+sys.exit(main())
