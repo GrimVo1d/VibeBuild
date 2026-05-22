@@ -114,7 +114,7 @@ class KojiBuilder:
         self.scratch = scratch
         self.nowait = nowait
         self.no_ssl_verify = no_ssl_verify
-        self.force = force            # disable the idempotency skip
+        self.force = force  # disable the idempotency skip
         self.idempotent = idempotent  # enable the idempotency pre-check (off by default)
 
         self.koji_client = KojiClient(
@@ -221,13 +221,13 @@ class KojiBuilder:
             and not self.scratch
         ):
             try:
-                latest = self.koji_client.latest_build(
-                    package_info.name, self.target
-                )
+                latest = self.koji_client.latest_build(package_info.name, self.target)
                 if latest and latest.get("nvr") == package_info.nvr:
                     logger.info(
                         "  %s already built in %s (NVR=%s), skipping",
-                        package_info.name, self.target, latest["nvr"],
+                        package_info.name,
+                        self.target,
+                        latest["nvr"],
                     )
                     task.status = BuildStatus.ALREADY_BUILT
                     return task
@@ -237,15 +237,16 @@ class KojiBuilder:
         # Ensure the package is registered in the destination tag
         dest_tag = self.target  # e.g. "f42"
         add_result = self._run_koji(
-            "add-pkg", dest_tag, package_info.name, "--owner=kojiadmin",
+            "add-pkg",
+            dest_tag,
+            package_info.name,
+            "--owner=kojiadmin",
             timeout=120,
         )
         if add_result.returncode != 0:
             # Ignore "already exists" errors
             if "already exists" not in (add_result.stderr or ""):
-                logger.warning(
-                    f"add-pkg failed (may already exist): {add_result.stderr}"
-                )
+                logger.warning(f"add-pkg failed (may already exist): {add_result.stderr}")
 
         # Always submit with --nowait
         cmd_args = ["build", "--nowait"]
@@ -301,7 +302,9 @@ class KojiBuilder:
 
         return task
 
-    def _poll_build(self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30) -> BuildStatus:
+    def _poll_build(
+        self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30
+    ) -> BuildStatus:
         """Poll a build task with progress logging.
 
         `interval` is accepted as the maximum interval; the real interval is
@@ -429,13 +432,11 @@ class KojiBuilder:
                 logger.info(f"Triggered newRepo for {self.build_tag}")
 
         logger.info(f"Waiting for repo to be ready: {self.build_tag}")
-        wait_result = self._run_koji(
-            "wait-repo", self.build_tag, "--timeout=1800", timeout=1860
-        )
+        wait_result = self._run_koji("wait-repo", self.build_tag, "--timeout=1800", timeout=1860)
         if wait_result.returncode == 0:
             logger.info("Repo is ready")
         else:
-            logger.warning(f"wait-repo returned non-zero, proceeding anyway")
+            logger.warning("wait-repo returned non-zero, proceeding anyway")
 
     def wait_for_repo(self, tag: Optional[str] = None, timeout: int = 1800) -> bool:
         """

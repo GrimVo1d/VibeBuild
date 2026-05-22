@@ -1,8 +1,6 @@
 """Tests for the persistent SRPM parse cache."""
-from __future__ import annotations
 
-import json
-from pathlib import Path
+from __future__ import annotations
 
 import pytest
 
@@ -28,7 +26,9 @@ def sample_srpm(tmp_path):
 @pytest.fixture
 def sample_info():
     return PackageInfo(
-        name="x", version="1.0", release="1",
+        name="x",
+        version="1.0",
+        release="1",
         build_requires=[
             BuildRequirement(name="gcc"),
             BuildRequirement(name="cffi", version="1.12", operator=">="),

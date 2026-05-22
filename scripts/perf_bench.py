@@ -78,9 +78,16 @@ def scenario_name_resolver_1000() -> dict:
     from vibebuild.name_resolver import PackageNameResolver
 
     inputs = [
-        "python3dist(requests)", "python3dist(numpy)", "perl(File::Path)",
-        "pkgconfig(glib-2.0)", "pkgconfig(openssl)", "rubygem(rake)",
-        "cmake(spdlog)", "python3-devel", "gcc", "make",
+        "python3dist(requests)",
+        "python3dist(numpy)",
+        "perl(File::Path)",
+        "pkgconfig(glib-2.0)",
+        "pkgconfig(openssl)",
+        "rubygem(rake)",
+        "cmake(spdlog)",
+        "python3-devel",
+        "gcc",
+        "make",
     ] * 100
 
     r = PackageNameResolver()
@@ -125,9 +132,16 @@ def main() -> int:
         print(f"  ml_load: {results['ml_load']}", file=sys.stderr)
 
         provides = [
-            "python3dist(setuptools-rust)", "pkgconfig(openssl3)", "perl(LWP::Simple)",
-            "rust-packaging", "python3dist(numpy)", "cmake(spdlog)",
-            "pkgconfig(glib-2.0)", "rubygem(rake)", "tex(stmaryrd.sty)", "crate(serde)",
+            "python3dist(setuptools-rust)",
+            "pkgconfig(openssl3)",
+            "perl(LWP::Simple)",
+            "rust-packaging",
+            "python3dist(numpy)",
+            "cmake(spdlog)",
+            "pkgconfig(glib-2.0)",
+            "rubygem(rake)",
+            "tex(stmaryrd.sty)",
+            "crate(serde)",
         ]
         results["ml_predict_100"] = scenario_ml_predict_100(provides)
         print(f"  ml_predict_100: {results['ml_predict_100']}", file=sys.stderr)

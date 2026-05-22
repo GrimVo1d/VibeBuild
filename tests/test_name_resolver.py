@@ -1,7 +1,6 @@
 """Tests for vibebuild.name_resolver module."""
 
-import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from vibebuild.name_resolver import (
     PROVIDE_PATTERNS,
@@ -433,7 +432,10 @@ class TestGetDownloadCandidates:
     def test_with_ml_resolver_dict_result(self):
         """ML resolver returning dict with srpm_name and rpm_name."""
         mock_ml = Mock()
-        mock_ml.predict.return_value = {"srpm_name": "python-requests", "rpm_name": "python3-requests"}
+        mock_ml.predict.return_value = {
+            "srpm_name": "python-requests",
+            "rpm_name": "python3-requests",
+        }
         resolver = PackageNameResolver(ml_resolver=mock_ml)
 
         result = resolver.get_download_candidates("python3dist(requests)")
@@ -527,7 +529,10 @@ class TestMLFallbackDictResult:
     def test_ml_returns_dict_with_same_rpm_name_falls_through(self):
         """ML dict with rpm_name same as input should fall through."""
         mock_ml = Mock()
-        mock_ml.predict.return_value = {"rpm_name": "custom_provider(something)", "srpm_name": "src"}
+        mock_ml.predict.return_value = {
+            "rpm_name": "custom_provider(something)",
+            "srpm_name": "src",
+        }
         resolver = PackageNameResolver(ml_resolver=mock_ml)
 
         result = resolver.resolve("custom_provider(something)")

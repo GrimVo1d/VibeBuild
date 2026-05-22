@@ -115,9 +115,7 @@ def evaluate_model(resolver, test_data: list[dict]) -> dict:
 
 def main() -> None:
     """Main entry point for model training."""
-    parser = argparse.ArgumentParser(
-        description="Train the ML package name resolver model"
-    )
+    parser = argparse.ArgumentParser(description="Train the ML package name resolver model")
     parser.add_argument(
         "--input",
         type=str,
@@ -146,8 +144,8 @@ def main() -> None:
         type=int,
         default=1000,
         help="Maximum number of test samples to evaluate (random subset). "
-             "Brute-force cosine on >10k samples is impractically slow. "
-             "Use 0 to evaluate all (very slow on large datasets).",
+        "Brute-force cosine on >10k samples is impractically slow. "
+        "Use 0 to evaluate all (very slow on large datasets).",
     )
     parser.add_argument(
         "--seed",
@@ -164,6 +162,7 @@ def main() -> None:
 
     # Split data (shuffle deterministically first so that test_data is a random slice)
     import random
+
     rng = random.Random(args.seed)
     if args.test_split > 0 and len(data) > 10:
         data = list(data)
@@ -217,19 +216,31 @@ def main() -> None:
             eval_data = rng.sample(test_data, args.eval_sample)
             logger.info(
                 "Evaluating on %d random samples (of %d test entries)",
-                len(eval_data), len(test_data),
+                len(eval_data),
+                len(test_data),
             )
         logger.info("--- Evaluation on test set ---")
         eval_start = time.time()
         metrics = evaluate_model(resolver, eval_data)
         logger.info("Evaluation took %.2f seconds", time.time() - eval_start)
         logger.info("Test samples:    %d", metrics["total"])
-        logger.info("Predictions:     %d (coverage: %.1f%%)", metrics["predicted"],
-                     metrics["coverage"] * 100)
-        logger.info("RPM accuracy:    %.1f%% (%d/%d)", metrics["rpm_accuracy"] * 100,
-                     metrics["correct_rpm"], metrics["predicted"])
-        logger.info("SRPM accuracy:   %.1f%% (%d/%d)", metrics["srpm_accuracy"] * 100,
-                     metrics["correct_srpm"], metrics["predicted"])
+        logger.info(
+            "Predictions:     %d (coverage: %.1f%%)",
+            metrics["predicted"],
+            metrics["coverage"] * 100,
+        )
+        logger.info(
+            "RPM accuracy:    %.1f%% (%d/%d)",
+            metrics["rpm_accuracy"] * 100,
+            metrics["correct_rpm"],
+            metrics["predicted"],
+        )
+        logger.info(
+            "SRPM accuracy:   %.1f%% (%d/%d)",
+            metrics["srpm_accuracy"] * 100,
+            metrics["correct_srpm"],
+            metrics["predicted"],
+        )
 
     # Save model
     logger.info("Saving model to %s...", args.output)

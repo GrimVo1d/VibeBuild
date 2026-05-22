@@ -2,9 +2,10 @@
 Pytest configuration and fixtures for VibeBuild tests.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -141,7 +142,8 @@ def temp_srpm(tmp_path, sample_spec_content):
 @pytest.fixture
 def mock_package_info():
     """Mock PackageInfo for testing."""
-    from vibebuild.analyzer import PackageInfo, BuildRequirement
+    from vibebuild.analyzer import BuildRequirement, PackageInfo
+
     return PackageInfo(
         name="test-package",
         version="1.0",
@@ -151,28 +153,29 @@ def mock_package_info():
             BuildRequirement(name="gcc"),
             BuildRequirement(name="make", version="4.0", operator=">="),
         ],
-        source_urls=["https://example.internal/test-package-1.0.tar.gz"]
+        source_urls=["https://example.internal/test-package-1.0.tar.gz"],
     )
 
 
 @pytest.fixture
 def mock_build_result():
     """Mock BuildResult for testing."""
-    from vibebuild.builder import BuildResult, BuildTask, BuildStatus
+    from vibebuild.builder import BuildResult, BuildStatus, BuildTask
+
     task = BuildTask(
         package_name="test-package",
         srpm_path="/path/to/test.src.rpm",
         target="fedora-target",
         task_id=12345,
         status=BuildStatus.COMPLETE,
-        nvr="test-package-1.0-1.fc40"
+        nvr="test-package-1.0-1.fc40",
     )
     return BuildResult(
         success=True,
         tasks=[task],
         built_packages=["test-package"],
         failed_packages=[],
-        total_time=60.0
+        total_time=60.0,
     )
 
 

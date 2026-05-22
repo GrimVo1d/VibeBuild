@@ -9,6 +9,7 @@ Used in hot paths where the network/Koji may blink:
 IMPORTANT: retry must NOT hide programming bugs: we retry only on
 exceptions/signals matched by the `transient_marker` function.
 """
+
 from __future__ import annotations
 
 import functools
@@ -83,8 +84,12 @@ def with_retry(
                         raise
                     logger.warning(
                         "%s attempt %d/%d failed (%s: %s); waiting %.1fs",
-                        fn.__name__, attempt, attempts,
-                        type(exc).__name__, exc, delay,
+                        fn.__name__,
+                        attempt,
+                        attempts,
+                        type(exc).__name__,
+                        exc,
+                        delay,
                     )
                     time.sleep(delay)
                     delay *= backoff

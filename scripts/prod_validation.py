@@ -23,7 +23,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("prod_validation")
@@ -32,42 +31,126 @@ logger = logging.getLogger("prod_validation")
 # The goal is to cover the main families of BR resolution.
 PACKAGES = [
     # trivial
-    "hello", "tree", "jq",
+    "hello",
+    "tree",
+    "jq",
     # python: a wide stack
-    "python-six", "python-attrs", "python-requests", "python-click",
-    "python-jinja2", "python-pyyaml", "python-flask", "python-django",
-    "python-pytest", "python-pip", "python-setuptools", "python-wheel",
-    "python-virtualenv", "python-tox", "python-toml", "python-typing-extensions",
-    "python-charset-normalizer", "python-urllib3", "python-idna", "python-certifi",
-    "python-iso8601", "python-pretend", "python-hypothesis", "python-trustme",
+    "python-six",
+    "python-attrs",
+    "python-requests",
+    "python-click",
+    "python-jinja2",
+    "python-pyyaml",
+    "python-flask",
+    "python-django",
+    "python-pytest",
+    "python-pip",
+    "python-setuptools",
+    "python-wheel",
+    "python-virtualenv",
+    "python-tox",
+    "python-toml",
+    "python-typing-extensions",
+    "python-charset-normalizer",
+    "python-urllib3",
+    "python-idna",
+    "python-certifi",
+    "python-iso8601",
+    "python-pretend",
+    "python-hypothesis",
+    "python-trustme",
     # python C-extensions
-    "python-cryptography", "python-cffi", "python-numpy", "python-scipy",
-    "python-pillow", "python-lxml", "python-psutil", "python-psycopg2",
-    "python-pyzmq", "python-pycurl",
+    "python-cryptography",
+    "python-cffi",
+    "python-numpy",
+    "python-scipy",
+    "python-pillow",
+    "python-lxml",
+    "python-psutil",
+    "python-psycopg2",
+    "python-pyzmq",
+    "python-pycurl",
     # perl
-    "perl", "perl-LWP-Protocol-https", "perl-Test-Simple", "perl-DBI", "perl-JSON",
-    "perl-Module-Build", "perl-File-Path", "perl-Encode",
+    "perl",
+    "perl-LWP-Protocol-https",
+    "perl-Test-Simple",
+    "perl-DBI",
+    "perl-JSON",
+    "perl-Module-Build",
+    "perl-File-Path",
+    "perl-Encode",
     # ruby
-    "ruby", "rubygem-rake", "rubygem-rspec", "rubygem-bundler",
+    "ruby",
+    "rubygem-rake",
+    "rubygem-rspec",
+    "rubygem-bundler",
     # nodejs
-    "nodejs", "nodejs-express",
+    "nodejs",
+    "nodejs-express",
     # system libraries
-    "openssl", "glibc", "zlib", "libxml2", "libxslt", "libpng", "libjpeg-turbo",
-    "ncurses", "readline", "sqlite", "pcre2", "expat", "curl",
+    "openssl",
+    "glibc",
+    "zlib",
+    "libxml2",
+    "libxslt",
+    "libpng",
+    "libjpeg-turbo",
+    "ncurses",
+    "readline",
+    "sqlite",
+    "pcre2",
+    "expat",
+    "curl",
     # build/dev tools
-    "gcc", "make", "cmake", "meson", "ninja-build", "autoconf", "automake",
-    "libtool", "pkgconf", "rust", "cargo", "golang",
+    "gcc",
+    "make",
+    "cmake",
+    "meson",
+    "ninja-build",
+    "autoconf",
+    "automake",
+    "libtool",
+    "pkgconf",
+    "rust",
+    "cargo",
+    "golang",
     # servers
-    "httpd", "nginx", "postgresql", "mariadb", "redis", "memcached",
+    "httpd",
+    "nginx",
+    "postgresql",
+    "mariadb",
+    "redis",
+    "memcached",
     # tools
-    "git", "vim", "tmux", "htop", "tar", "gzip", "bzip2", "xz",
-    "rsync", "openssh", "sudo", "systemd",
+    "git",
+    "vim",
+    "tmux",
+    "htop",
+    "tar",
+    "gzip",
+    "bzip2",
+    "xz",
+    "rsync",
+    "openssh",
+    "sudo",
+    "systemd",
     # graphics/multimedia (often exotic BR)
-    "ImageMagick", "ffmpeg-free", "gstreamer1", "cairo", "pango", "gtk3",
+    "ImageMagick",
+    "ffmpeg-free",
+    "gstreamer1",
+    "cairo",
+    "pango",
+    "gtk3",
     # background infrastructure
-    "dbus", "polkit", "NetworkManager", "iptables",
+    "dbus",
+    "polkit",
+    "NetworkManager",
+    "iptables",
     # exotic
-    "texlive-base", "ghostscript", "graphviz", "doxygen",
+    "texlive-base",
+    "ghostscript",
+    "graphviz",
+    "doxygen",
 ]
 
 
@@ -107,9 +190,9 @@ def validate_package(
         "duration": 0.0,
         "error": None,
         "build_requires_count": 0,
-        "changed_by_rules": 0,    # name_resolver returned a different name (resolved a virtual provide/macro)
-        "changed_by_ml": 0,       # ML returned a different name
-        "passthrough": 0,         # name left as is (often basic ones: gcc, make, glibc)
+        "changed_by_rules": 0,  # name_resolver returned a different name (virtual provide/macro)
+        "changed_by_ml": 0,  # ML returned a different name
+        "passthrough": 0,  # name left as is (often basic ones: gcc, make, glibc)
     }
     t0 = time.monotonic()
     try:
@@ -166,17 +249,12 @@ def validate_package(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wide-scale read-only validation")
     parser.add_argument(
-        "--output", default="prod_validation_report.json",
-        help="Where to save the JSON report"
+        "--output", default="prod_validation_report.json", help="Where to save the JSON report"
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
-        help="Limit the number of packages (for a quick check)"
+        "--limit", type=int, default=None, help="Limit the number of packages (for a quick check)"
     )
-    parser.add_argument(
-        "--release", default="rawhide",
-        help="Fedora release (rawhide or f42)"
-    )
+    parser.add_argument("--release", default="rawhide", help="Fedora release (rawhide or f42)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -213,8 +291,12 @@ def main() -> int:
     for i, pkg in enumerate(packages, 1):
         print(f"[{i:3d}/{len(packages)}] {pkg}...", file=sys.stderr, end=" ", flush=True)
         r = validate_package(
-            pkg, fetcher, name_resolver, ml_resolver,
-            get_package_info, work_dir,
+            pkg,
+            fetcher,
+            name_resolver,
+            ml_resolver,
+            get_package_info,
+            work_dir,
         )
         results.append(r)
         if r["success"]:

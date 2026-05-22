@@ -8,6 +8,7 @@ This module is a facade over `scripts/collect_training_data.py` and
 All these functions are slow (network, training). Tests do not call them; for
 unit tests the smoke scenario is `vibebuild train --help`.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -49,6 +50,7 @@ def collect(release: int, arch: str, output: str) -> int:
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     import json
+
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(mappings, f, indent=2)
     logger.info("Saved %d records to %s", len(mappings), output)
@@ -67,6 +69,7 @@ def train(
     data = mod.load_training_data(input_path)
 
     import random
+
     rng = random.Random(seed)
     data = list(data)
     rng.shuffle(data)
@@ -78,6 +81,7 @@ def train(
         train_data, test_data = data, []
 
     from vibebuild.ml_resolver import MLPackageResolver
+
     resolver = MLPackageResolver.__new__(MLPackageResolver)
     resolver.confidence_threshold = 0.3
     resolver._vectorizer = None
@@ -123,8 +127,7 @@ def collect_and_train(
     try:
         n = collect(release, arch, raw_path)
         logger.info("Raw records: %d", n)
-        metrics = train(raw_path, output, test_split=test_split,
-                        eval_sample=eval_sample, seed=seed)
+        metrics = train(raw_path, output, test_split=test_split, eval_sample=eval_sample, seed=seed)
         return metrics
     finally:
         if not keep_raw and raw_path:

@@ -4,6 +4,7 @@ Persistent SRPM parse cache. The key is sha256 of the file + size + vibebuild ve
 On a repeated call of `get_package_info_from_srpm(path)` on the same SRPM
 the parsing (rpm2cpio + cpio + spec analysis) is skipped.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -12,7 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vibebuild.analyzer import PackageInfo

@@ -1,17 +1,18 @@
 """Tests for vibebuild.resolver module."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-from vibebuild.resolver import (
-    DependencyNode,
-    KojiClient,
-    DependencyResolver,
-)
+import pytest
+
 from vibebuild.analyzer import BuildRequirement
 from vibebuild.exceptions import (
     CircularDependencyError,
     KojiConnectionError,
+)
+from vibebuild.resolver import (
+    DependencyNode,
+    DependencyResolver,
+    KojiClient,
 )
 
 
@@ -32,7 +33,7 @@ class TestDependencyNode:
             srpm_path="/path/to/test.src.rpm",
             dependencies=["dep1", "dep2"],
             is_available=True,
-            build_order=5
+            build_order=5,
         )
 
         assert node.name == "test-pkg"
@@ -54,7 +55,7 @@ class TestKojiClient:
             server="https://custom.koji.internal/kojihub",
             web_url="https://custom.koji.internal/koji",
             cert="/path/to/cert.pem",
-            serverca="/path/to/ca.crt"
+            serverca="/path/to/ca.crt",
         )
 
         assert client.server == "https://custom.koji.internal/kojihub"
@@ -144,6 +145,7 @@ gcc-13.0-1.fc40  fedora-build  admin
 
     def test_command_timeout_raises(self, mock_subprocess_run):
         import subprocess
+
         mock_subprocess_run.side_effect = subprocess.TimeoutExpired(cmd="koji", timeout=60)
         client = KojiClient()
 
@@ -161,10 +163,7 @@ class TestDependencyResolver:
         assert resolver._dependency_graph == {}
 
     def test_custom_initialization(self, mock_koji_client):
-        resolver = DependencyResolver(
-            koji_client=mock_koji_client,
-            koji_tag="custom-tag"
-        )
+        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="custom-tag")
 
         assert resolver.koji == mock_koji_client
         assert resolver.koji_tag == "custom-tag"
@@ -223,7 +222,7 @@ class TestDependencyResolver:
         resolver = DependencyResolver(koji_client=mock_koji_client)
         deps = [
             BuildRequirement(name="gcc"),
-            BuildRequirement(name="missing-dep", version="1.0", operator=">=")
+            BuildRequirement(name="missing-dep", version="1.0", operator=">="),
         ]
 
         result = resolver.find_missing_deps(deps)
@@ -255,6 +254,7 @@ class TestDependencyResolver:
     def test_build_dependency_graph_with_deps(self, mock_koji_client):
         def package_exists_side_effect(pkg, tag):
             return pkg in ["dep1", "dep2"]
+
         mock_koji_client.package_exists.side_effect = package_exists_side_effect
         resolver = DependencyResolver(koji_client=mock_koji_client)
 
@@ -263,7 +263,7 @@ class TestDependencyResolver:
             result = resolver.build_dependency_graph(
                 "main-pkg",
                 "/path/to/main.src.rpm",
-                srpm_resolver=lambda pkg: f"/path/to/{pkg}.src.rpm" if pkg == "dep3" else None
+                srpm_resolver=lambda pkg: f"/path/to/{pkg}.src.rpm" if pkg == "dep3" else None,
             )
 
         assert "main-pkg" in result
@@ -279,9 +279,7 @@ class TestDependencyResolver:
 
     def test_topological_sort_single_package(self, mock_koji_client):
         resolver = DependencyResolver(koji_client=mock_koji_client)
-        resolver._dependency_graph = {
-            "pkg-a": DependencyNode(name="pkg-a", is_available=False)
-        }
+        resolver._dependency_graph = {"pkg-a": DependencyNode(name="pkg-a", is_available=False)}
 
         result = resolver.topological_sort()
 
@@ -349,7 +347,9 @@ class TestDependencyResolver:
     def test_get_missing_packages(self, mock_koji_client):
         resolver = DependencyResolver(koji_client=mock_koji_client)
         resolver._dependency_graph = {
-            "with-srpm": DependencyNode(name="with-srpm", srpm_path="/path/to.src.rpm", is_available=False),
+            "with-srpm": DependencyNode(
+                name="with-srpm", srpm_path="/path/to.src.rpm", is_available=False
+            ),
             "no-srpm": DependencyNode(name="no-srpm", srpm_path=None, is_available=False),
             "available": DependencyNode(name="available", is_available=True),
         }
@@ -419,7 +419,9 @@ class TestDependencyResolverWithNameResolver:
     def test_find_missing_deps_with_name_resolver(self, mock_koji_client):
         """find_missing_deps should use name_resolver to resolve names."""
         mock_nr = Mock()
-        mock_nr.resolve.side_effect = lambda n: "python3-requests" if n == "python3dist(requests)" else n
+        mock_nr.resolve.side_effect = lambda n: (
+            "python3-requests" if n == "python3dist(requests)" else n
+        )
         mock_koji_client.list_packages.return_value = ["python3-requests", "gcc"]
         mock_koji_client.package_exists.return_value = True
         resolver = DependencyResolver(koji_client=mock_koji_client, name_resolver=mock_nr)
@@ -534,7 +536,9 @@ class TestListPackagesEmptyLines:
     def test_list_tagged_builds_with_empty_lines(self, mock_subprocess_run):
         """list_tagged_builds should handle empty lines in output."""
         mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-3.11.0-1.fc40  fedora-build  admin\n\ngcc-13.0-1.fc40  fedora-build  admin\n"
+        mock_subprocess_run.return_value.stdout = (
+            "python3-3.11.0-1.fc40  fedora-build  admin\n\ngcc-13.0-1.fc40  fedora-build  admin\n"
+        )
         mock_subprocess_run.return_value.stderr = ""
         client = KojiClient()
 
@@ -548,7 +552,9 @@ class TestListTaggedBuildsWhitespaceLine:
     def test_list_tagged_builds_whitespace_only_line(self, mock_subprocess_run):
         """list_tagged_builds should handle whitespace-only lines."""
         mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-3.11.0-1.fc40  tag  admin\n   \ngcc-13.0-1.fc40  tag  admin\n"
+        mock_subprocess_run.return_value.stdout = (
+            "python3-3.11.0-1.fc40  tag  admin\n   \ngcc-13.0-1.fc40  tag  admin\n"
+        )
         mock_subprocess_run.return_value.stderr = ""
         client = KojiClient()
 
@@ -581,8 +587,7 @@ class TestBuildDependencyGraphEdgeCases:
         with patch("vibebuild.resolver.get_build_requires") as mock_reqs:
             mock_reqs.return_value = ["dep-no-srpm"]
             result = resolver.build_dependency_graph(
-                "root", "/path/to/root.src.rpm",
-                srpm_resolver=lambda pkg: None
+                "root", "/path/to/root.src.rpm", srpm_resolver=lambda pkg: None
             )
 
         assert "dep-no-srpm" in result
@@ -595,9 +600,7 @@ class TestBuildDependencyGraphEdgeCases:
 
         with patch("vibebuild.resolver.get_build_requires") as mock_reqs:
             mock_reqs.side_effect = lambda srpm: ["dep"] if "root" in srpm else []
-            result = resolver.build_dependency_graph(
-                "root", "/path/to/root.src.rpm"
-            )
+            result = resolver.build_dependency_graph("root", "/path/to/root.src.rpm")
 
         assert "dep" in result
         assert result["dep"].srpm_path is None
@@ -608,7 +611,9 @@ class TestTopologicalSortEdgeCases:
         """Dep reference not in graph should be handled."""
         resolver = DependencyResolver(koji_client=mock_koji_client)
         resolver._dependency_graph = {
-            "pkg-a": DependencyNode(name="pkg-a", dependencies=["external-dep"], is_available=False),
+            "pkg-a": DependencyNode(
+                name="pkg-a", dependencies=["external-dep"], is_available=False
+            ),
         }
 
         result = resolver.topological_sort()
@@ -637,7 +642,8 @@ class TestKojiClientHasExternalRepos:
         mock_subprocess_run.return_value.stdout = (
             "Tag                  Repo Name            URL\n"
             "---                  ---------            ---\n"
-            "f42-build            fedora-42            http://kojipkgs.fedoraproject.org/repos/f42/\n"
+            "f42-build            fedora-42            "
+            "http://kojipkgs.fedoraproject.org/repos/f42/\n"
         )
         mock_subprocess_run.return_value.stderr = ""
         client = KojiClient()
@@ -714,7 +720,7 @@ class TestDependencyResolverExternalRepos:
         assert "gcc" not in result
 
     def test_find_missing_deps_external_repos_registered_but_not_built(self, mock_koji_client):
-        """Registered package not yet built is still treated as available (registered = available)."""
+        """Registered package not yet built is treated as available."""
         mock_koji_client.list_packages.return_value = ["my-custom-pkg"]
         mock_koji_client.package_exists.return_value = False
         mock_koji_client.has_external_repos.return_value = True
@@ -742,9 +748,9 @@ class TestDependencyResolverExternalRepos:
         mock_koji_client.has_external_repos.return_value = True
         resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
 
-        result = resolver.find_missing_deps([
-            "python3-devel", "python3-setuptools", "python3-pip", "gcc"
-        ])
+        result = resolver.find_missing_deps(
+            ["python3-devel", "python3-setuptools", "python3-pip", "gcc"]
+        )
 
         assert result == []
 

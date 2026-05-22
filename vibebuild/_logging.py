@@ -7,6 +7,7 @@ Usage:
 Any `logger.info("msg", extra={"package": "X"})` will be serialized as JSON
 with timestamp/level/module/message/package fields.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,10 +17,28 @@ from datetime import datetime, timezone
 # LogRecord attributes that we do NOT copy into JSON (everything in the standard set).
 _STANDARD_ATTRS = frozenset(
     {
-        "args", "asctime", "created", "exc_info", "exc_text", "filename",
-        "funcName", "levelname", "levelno", "lineno", "message", "module",
-        "msecs", "msg", "name", "pathname", "process", "processName",
-        "relativeCreated", "stack_info", "thread", "threadName",
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
         "taskName",  # Python 3.12+
     }
 )
@@ -30,9 +49,7 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "module": record.module,
             "message": record.getMessage(),

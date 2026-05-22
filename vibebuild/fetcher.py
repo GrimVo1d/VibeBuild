@@ -166,7 +166,11 @@ class SRPMFetcher:
         if self.fedora_release == "rawhide":
             tag = self._resolve_rawhide_tag(server)
         else:
-            tag = f"f{self.fedora_release}" if not self.fedora_release.startswith("f") else self.fedora_release
+            tag = (
+                f"f{self.fedora_release}"
+                if not self.fedora_release.startswith("f")
+                else self.fedora_release
+            )
         try:
             if version:
                 build_info = server.getBuild(f"{package_name}-{version}")
@@ -176,7 +180,9 @@ class SRPMFetcher:
                     builds = server.getLatestBuilds("rawhide", None, package_name)
                 if not builds:
                     # Try the previous release tag as well
-                    tag_num = int(tag.lstrip("f")) if tag.startswith("f") and tag[1:].isdigit() else 0
+                    tag_num = (
+                        int(tag.lstrip("f")) if tag.startswith("f") and tag[1:].isdigit() else 0
+                    )
                     if tag_num > 0:
                         for prev in range(tag_num - 1, tag_num - 4, -1):
                             builds = server.getLatestBuilds(f"f{prev}", None, package_name)
@@ -187,7 +193,7 @@ class SRPMFetcher:
                 build_info = builds[0]
         except SRPMNotFoundError:
             raise
-        except Exception as e:
+        except Exception:
             raise SRPMNotFoundError(f"Package {package_name} not found in Koji")
 
         if not build_info:

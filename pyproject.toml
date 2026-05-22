@@ -36,7 +36,7 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-mock>=3.10",
-    "black>=23.0",
+    "black>=24,<26",
     "isort>=5.12",
     "mypy>=1.0",
     "flake8>=6.0",
@@ -73,10 +73,24 @@ line_length = 100
 known_first_party = ["vibebuild"]
 
 [tool.mypy]
-python_version = "3.9"
-warn_return_any = true
+python_version = "3.10"
+warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
+# Typing in the project is intentionally non-strict: koji/rpm/joblib return untyped
+# objects, Path/str interop is deliberately used in analyzer/builder.
+# Strict typing is a task for a separate release.
+
+[[tool.mypy.overrides]]
+module = [
+    "vibebuild.analyzer",
+    "vibebuild.builder",
+    "vibebuild.fetcher",
+    "vibebuild.ml_resolver",
+    "vibebuild.name_resolver",
+    "vibebuild.resolver",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

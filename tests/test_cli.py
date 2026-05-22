@@ -1,26 +1,26 @@
 """Tests for vibebuild.cli module."""
 
-import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
 import sys
-from io import StringIO
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from vibebuild.analyzer import BuildRequirement, PackageInfo
+from vibebuild.builder import BuildResult, BuildStatus, BuildTask
 from vibebuild.cli import (
-    create_parser,
-    setup_logging,
-    print_build_result,
-    cmd_analyze,
-    cmd_download,
-    cmd_build,
-    main,
-    load_koji_config,
-    create_name_resolver,
-    ensure_srpm_path,
     _HelpAllArgumentParser,
+    cmd_analyze,
+    cmd_build,
+    cmd_download,
+    create_name_resolver,
+    create_parser,
+    ensure_srpm_path,
+    load_koji_config,
+    main,
+    print_build_result,
+    setup_logging,
 )
-from vibebuild.builder import BuildResult, BuildTask, BuildStatus
-from vibebuild.analyzer import PackageInfo, BuildRequirement
 from vibebuild.exceptions import VibeBuildError
 
 
@@ -77,15 +77,24 @@ class TestCreateParser:
     def test_parser_server_option(self):
         parser = create_parser()
 
-        args = parser.parse_args(["--server", "https://custom.koji/kojihub", "target", "pkg.src.rpm"])
+        args = parser.parse_args(
+            ["--server", "https://custom.koji/kojihub", "target", "pkg.src.rpm"]
+        )
 
         assert args.server == "https://custom.koji/kojihub"
 
     def test_parser_server_default(self):
-        with patch("vibebuild.cli.load_koji_config", return_value={
-            "server": None, "web_url": None, "cert": None,
-            "serverca": None, "target": None, "build_tag": None,
-        }):
+        with patch(
+            "vibebuild.cli.load_koji_config",
+            return_value={
+                "server": None,
+                "web_url": None,
+                "cert": None,
+                "serverca": None,
+                "target": None,
+                "build_tag": None,
+            },
+        ):
             parser = create_parser()
 
         args = parser.parse_args(["target", "pkg.src.rpm"])
@@ -121,10 +130,17 @@ class TestCreateParser:
         assert args.build_tag == "custom-build"
 
     def test_parser_build_tag_default(self):
-        with patch("vibebuild.cli.load_koji_config", return_value={
-            "server": None, "web_url": None, "cert": None,
-            "serverca": None, "target": None, "build_tag": None,
-        }):
+        with patch(
+            "vibebuild.cli.load_koji_config",
+            return_value={
+                "server": None,
+                "web_url": None,
+                "cert": None,
+                "serverca": None,
+                "target": None,
+                "build_tag": None,
+            },
+        ):
             parser = create_parser()
 
         args = parser.parse_args(["target", "pkg.src.rpm"])
@@ -163,6 +179,7 @@ class TestCreateParser:
 class TestSetupLogging:
     def test_default_level_info(self):
         import logging
+
         root_logger = logging.getLogger()
         root_logger.handlers = []
         root_logger.setLevel(logging.NOTSET)
@@ -172,6 +189,7 @@ class TestSetupLogging:
 
     def test_verbose_level_debug(self):
         import logging
+
         root_logger = logging.getLogger()
         root_logger.handlers = []
         root_logger.setLevel(logging.NOTSET)
@@ -181,6 +199,7 @@ class TestSetupLogging:
 
     def test_quiet_level_warning(self):
         import logging
+
         root_logger = logging.getLogger()
         root_logger.handlers = []
         root_logger.setLevel(logging.NOTSET)
@@ -192,10 +211,7 @@ class TestSetupLogging:
 class TestPrintBuildResult:
     def test_prints_success(self, capsys):
         result = BuildResult(
-            success=True,
-            built_packages=["pkg1", "pkg2"],
-            failed_packages=[],
-            total_time=60.0
+            success=True, built_packages=["pkg1", "pkg2"], failed_packages=[], total_time=60.0
         )
 
         print_build_result(result)
@@ -208,10 +224,7 @@ class TestPrintBuildResult:
 
     def test_prints_failure(self, capsys):
         result = BuildResult(
-            success=False,
-            built_packages=["pkg1"],
-            failed_packages=["pkg2"],
-            total_time=45.0
+            success=False, built_packages=["pkg1"], failed_packages=["pkg2"], total_time=45.0
         )
 
         print_build_result(result)
@@ -226,13 +239,10 @@ class TestPrintBuildResult:
             srpm_path="/path/to/test.src.rpm",
             target="target",
             task_id=12345,
-            status=BuildStatus.COMPLETE
+            status=BuildStatus.COMPLETE,
         )
         result = BuildResult(
-            success=True,
-            tasks=[task],
-            built_packages=["test-pkg"],
-            total_time=30.0
+            success=True, tasks=[task], built_packages=["test-pkg"], total_time=30.0
         )
 
         print_build_result(result)
@@ -247,13 +257,10 @@ class TestPrintBuildResult:
             srpm_path="/path/to/failed.src.rpm",
             target="target",
             status=BuildStatus.FAILED,
-            error_message="Dependency resolution failed"
+            error_message="Dependency resolution failed",
         )
         result = BuildResult(
-            success=False,
-            tasks=[task],
-            failed_packages=["failed-pkg"],
-            total_time=10.0
+            success=False, tasks=[task], failed_packages=["failed-pkg"], total_time=10.0
         )
 
         print_build_result(result)
@@ -265,12 +272,14 @@ class TestPrintBuildResult:
 class TestCmdAnalyze:
     def test_analyze_success(self, tmp_path, mock_subprocess_run, capsys):
         spec_file = tmp_path / "test.spec"
-        spec_file.write_text("""
+        spec_file.write_text(
+            """
 Name: test
 Version: 1.0
 Release: 1
 BuildRequires: gcc
-""")
+"""
+        )
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
         mock_subprocess_run.return_value.returncode = 0
@@ -282,7 +291,7 @@ BuildRequires: gcc
                 version="1.0",
                 release="1",
                 build_requires=[BuildRequirement(name="gcc")],
-                source_urls=[]
+                source_urls=[],
             )
             with patch("vibebuild.cli.KojiClient") as mock_client:
                 mock_client.return_value.package_exists.return_value = True
@@ -293,7 +302,7 @@ BuildRequires: gcc
                         "https://koji.fedoraproject.org/kojihub",
                         "fedora-build",
                         None,
-                        None
+                        None,
                     )
 
         assert result == 0
@@ -310,7 +319,7 @@ BuildRequires: gcc
                 version="1.0",
                 release="1",
                 build_requires=[BuildRequirement(name="missing-dep")],
-                source_urls=[]
+                source_urls=[],
             )
             with patch("vibebuild.cli.KojiClient"):
                 with patch("vibebuild.cli.DependencyResolver") as mock_resolver:
@@ -364,7 +373,7 @@ class TestCmdBuild:
             nowait=False,
             no_deps=False,
             download_dir=None,
-            dry_run=False
+            dry_run=False,
         )
 
         assert result == 1
@@ -376,8 +385,7 @@ class TestCmdBuild:
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
                 mock_info.return_value = PackageInfo(
-                    name="test", version="1.0", release="1",
-                    build_requires=[], source_urls=[]
+                    name="test", version="1.0", release="1", build_requires=[], source_urls=[]
                 )
                 mock_builder.return_value.resolver.build_dependency_graph.return_value = None
                 mock_builder.return_value.resolver.get_build_chain.return_value = []
@@ -393,7 +401,7 @@ class TestCmdBuild:
                     nowait=False,
                     no_deps=False,
                     download_dir=None,
-                    dry_run=True
+                    dry_run=True,
                 )
 
         assert result == 0
@@ -409,7 +417,7 @@ class TestCmdBuild:
                 package_name="test",
                 srpm_path=str(srpm),
                 target="target",
-                status=BuildStatus.COMPLETE
+                status=BuildStatus.COMPLETE,
             )
             mock_builder.return_value.build_package.return_value = mock_task
             result = cmd_build(
@@ -424,7 +432,7 @@ class TestCmdBuild:
                 nowait=False,
                 no_deps=True,
                 download_dir=None,
-                dry_run=False
+                dry_run=False,
             )
 
         assert result == 0
@@ -435,9 +443,7 @@ class TestCmdBuild:
 
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             mock_builder.return_value.build_with_deps.return_value = BuildResult(
-                success=True,
-                built_packages=["test"],
-                total_time=30.0
+                success=True, built_packages=["test"], total_time=30.0
             )
             result = cmd_build(
                 target="target",
@@ -451,7 +457,7 @@ class TestCmdBuild:
                 nowait=False,
                 no_deps=False,
                 download_dir=None,
-                dry_run=False
+                dry_run=False,
             )
 
         assert result == 0
@@ -473,9 +479,16 @@ class TestMain:
 
     def test_main_single_arg_without_config_target_fails(self):
         """Single positional arg with no target in config should exit with error."""
-        with patch("vibebuild.cli.load_koji_config", return_value={
-            "server": None, "web_url": None, "cert": None, "serverca": None, "target": None
-        }):
+        with patch(
+            "vibebuild.cli.load_koji_config",
+            return_value={
+                "server": None,
+                "web_url": None,
+                "cert": None,
+                "serverca": None,
+                "target": None,
+            },
+        ):
             with pytest.raises(SystemExit) as exc_info:
                 main(["only-package"])
 
@@ -518,7 +531,7 @@ class TestMain:
         with patch("vibebuild.cli.cmd_build") as mock_cmd:
             mock_cmd.return_value = 0
             with patch("vibebuild.cli.setup_logging") as mock_logging:
-                result = main(["-v", "target", str(srpm)])
+                main(["-v", "target", str(srpm)])
 
         mock_logging.assert_called_with(True, False, json_logs=False)
 
@@ -529,7 +542,7 @@ class TestMain:
         with patch("vibebuild.cli.cmd_build") as mock_cmd:
             mock_cmd.return_value = 0
             with patch("vibebuild.cli.setup_logging") as mock_logging:
-                result = main(["-q", "target", str(srpm)])
+                main(["-q", "target", str(srpm)])
 
         mock_logging.assert_called_with(False, True, json_logs=False)
 
@@ -540,16 +553,25 @@ class TestLoadKojiConfig:
         koji_dir = tmp_path / ".koji"
         koji_dir.mkdir()
         config_path = koji_dir / "config"
-        config_path.write_text("[koji]\nserver = https://my-koji/kojihub\nweburl = https://my-koji/koji\ncert = ~/client.pem\nserverca = ~/serverca.pem\n")
+        config_path.write_text(
+            "[koji]\n"
+            "server = https://my-koji/kojihub\n"
+            "weburl = https://my-koji/koji\n"
+            "cert = ~/client.pem\n"
+            "serverca = ~/serverca.pem\n"
+        )
 
         _orig_exists = Path.exists
+
         def _fake_exists(self):
             if str(self) == "/etc/koji.conf":
                 return False
             return _orig_exists(self)
 
-        with patch("vibebuild.cli.Path.home", return_value=tmp_path), \
-             patch.object(Path, "exists", _fake_exists):
+        with (
+            patch("vibebuild.cli.Path.home", return_value=tmp_path),
+            patch.object(Path, "exists", _fake_exists),
+        ):
             result = load_koji_config()
 
         assert isinstance(result, dict)
@@ -584,13 +606,16 @@ class TestLoadKojiConfig:
         config_path.write_text("[other]\nfoo = bar\n")
 
         _orig_exists = Path.exists
+
         def _fake_exists(self):
             if str(self) == "/etc/koji.conf":
                 return False
             return _orig_exists(self)
 
-        with patch("vibebuild.cli.Path.home", return_value=tmp_path), \
-             patch.object(Path, "exists", _fake_exists):
+        with (
+            patch("vibebuild.cli.Path.home", return_value=tmp_path),
+            patch.object(Path, "exists", _fake_exists),
+        ):
             result = load_koji_config()
 
         assert result["server"] is None
@@ -603,13 +628,16 @@ class TestLoadKojiConfig:
         config_path.write_text("[koji]\n")
 
         _orig_exists = Path.exists
+
         def _fake_exists(self):
             if str(self) == "/etc/koji.conf":
                 return False
             return _orig_exists(self)
 
-        with patch("vibebuild.cli.Path.home", return_value=tmp_path), \
-             patch.object(Path, "exists", _fake_exists):
+        with (
+            patch("vibebuild.cli.Path.home", return_value=tmp_path),
+            patch.object(Path, "exists", _fake_exists),
+        ):
             result = load_koji_config()
 
         assert result["server"] is None
@@ -689,7 +717,7 @@ class TestEnsureSrpmPath:
 
     def test_ensure_srpm_path_downloads_by_name(self, tmp_path):
         """ensure_srpm_path should download when path doesn't exist."""
-        with patch("vibebuild.cli.create_name_resolver") as mock_nr:
+        with patch("vibebuild.cli.create_name_resolver"):
             with patch("vibebuild.cli.SRPMFetcher") as mock_fetcher:
                 mock_fetcher.return_value.download_srpm.return_value = "/path/to/downloaded.src.rpm"
                 result = ensure_srpm_path("python3", str(tmp_path), False, False, None)
@@ -713,18 +741,29 @@ class TestCmdBuildEdgeCases:
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
                 mock_info.return_value = PackageInfo(
-                    name="test", version="1.0", release="1",
-                    build_requires=[], source_urls=[]
+                    name="test", version="1.0", release="1", build_requires=[], source_urls=[]
                 )
                 mock_builder.return_value.resolver.build_dependency_graph.return_value = None
-                mock_builder.return_value.resolver.get_build_chain.return_value = [["dep1"], ["dep2"]]
-                mock_builder.return_value.fetcher.download_srpm.return_value = "/path/to/dep.src.rpm"
+                mock_builder.return_value.resolver.get_build_chain.return_value = [
+                    ["dep1"],
+                    ["dep2"],
+                ]
+                mock_builder.return_value.fetcher.download_srpm.return_value = (
+                    "/path/to/dep.src.rpm"
+                )
                 result = cmd_build(
-                    target="target", srpm_path=str(srpm),
-                    server="server", web_url="web",
-                    cert=None, serverca=None,
-                    build_tag="tag", scratch=False, nowait=False,
-                    no_deps=False, download_dir=None, dry_run=True
+                    target="target",
+                    srpm_path=str(srpm),
+                    server="server",
+                    web_url="web",
+                    cert=None,
+                    serverca=None,
+                    build_tag="tag",
+                    scratch=False,
+                    nowait=False,
+                    no_deps=False,
+                    download_dir=None,
+                    dry_run=True,
                 )
 
         assert result == 0
@@ -744,17 +783,23 @@ class TestCmdBuildEdgeCases:
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
                 mock_info.return_value = PackageInfo(
-                    name="test", version="1.0", release="1",
-                    build_requires=[], source_urls=[]
+                    name="test", version="1.0", release="1", build_requires=[], source_urls=[]
                 )
                 mock_builder.return_value.resolver.build_dependency_graph.side_effect = capture
                 mock_builder.return_value.resolver.get_build_chain.return_value = []
                 result = cmd_build(
-                    target="target", srpm_path=str(srpm),
-                    server="server", web_url="web",
-                    cert=None, serverca=None,
-                    build_tag="tag", scratch=False, nowait=False,
-                    no_deps=False, download_dir=None, dry_run=True
+                    target="target",
+                    srpm_path=str(srpm),
+                    server="server",
+                    web_url="web",
+                    cert=None,
+                    serverca=None,
+                    build_tag="tag",
+                    scratch=False,
+                    nowait=False,
+                    no_deps=False,
+                    download_dir=None,
+                    dry_run=True,
                 )
 
         assert result == 0
@@ -771,18 +816,24 @@ class TestCmdBuildEdgeCases:
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
 
-        with patch("vibebuild.cli.KojiBuilder") as mock_builder:
+        with patch("vibebuild.cli.KojiBuilder"):
             with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
                 mock_info.return_value = PackageInfo(
-                    name="test", version="1.0", release="1",
-                    build_requires=[], source_urls=[]
+                    name="test", version="1.0", release="1", build_requires=[], source_urls=[]
                 )
                 result = cmd_build(
-                    target="target", srpm_path=str(srpm),
-                    server="server", web_url="web",
-                    cert=None, serverca=None,
-                    build_tag="tag", scratch=False, nowait=False,
-                    no_deps=True, download_dir=None, dry_run=True
+                    target="target",
+                    srpm_path=str(srpm),
+                    server="server",
+                    web_url="web",
+                    cert=None,
+                    serverca=None,
+                    build_tag="tag",
+                    scratch=False,
+                    nowait=False,
+                    no_deps=True,
+                    download_dir=None,
+                    dry_run=True,
                 )
 
         assert result == 0
@@ -797,11 +848,18 @@ class TestCmdBuildEdgeCases:
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             mock_builder.return_value.build_with_deps.side_effect = VibeBuildError("vibe error")
             result = cmd_build(
-                target="target", srpm_path=str(srpm),
-                server="server", web_url="web",
-                cert=None, serverca=None,
-                build_tag="tag", scratch=False, nowait=False,
-                no_deps=False, download_dir=None, dry_run=False
+                target="target",
+                srpm_path=str(srpm),
+                server="server",
+                web_url="web",
+                cert=None,
+                serverca=None,
+                build_tag="tag",
+                scratch=False,
+                nowait=False,
+                no_deps=False,
+                download_dir=None,
+                dry_run=False,
             )
 
         assert result == 1
@@ -814,11 +872,18 @@ class TestCmdBuildEdgeCases:
         with patch("vibebuild.cli.KojiBuilder") as mock_builder:
             mock_builder.return_value.build_with_deps.side_effect = RuntimeError("unexpected")
             result = cmd_build(
-                target="target", srpm_path=str(srpm),
-                server="server", web_url="web",
-                cert=None, serverca=None,
-                build_tag="tag", scratch=False, nowait=False,
-                no_deps=False, download_dir=None, dry_run=False
+                target="target",
+                srpm_path=str(srpm),
+                server="server",
+                web_url="web",
+                cert=None,
+                serverca=None,
+                build_tag="tag",
+                scratch=False,
+                nowait=False,
+                no_deps=False,
+                download_dir=None,
+                dry_run=False,
             )
 
         assert result == 1
@@ -841,10 +906,16 @@ class TestMainEdgeCases:
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
 
-        with patch("vibebuild.cli.load_koji_config", return_value={
-            "server": None, "web_url": None, "cert": None, "serverca": None,
-            "target": "fedora-target"
-        }):
+        with patch(
+            "vibebuild.cli.load_koji_config",
+            return_value={
+                "server": None,
+                "web_url": None,
+                "cert": None,
+                "serverca": None,
+                "target": "fedora-target",
+            },
+        ):
             with patch("vibebuild.cli.ensure_srpm_path", return_value=str(srpm)):
                 with patch("vibebuild.cli.cmd_build") as mock_cmd:
                     mock_cmd.return_value = 0
@@ -860,10 +931,16 @@ class TestMainEdgeCases:
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
 
-        with patch("vibebuild.cli.load_koji_config", return_value={
-            "server": None, "web_url": None, "cert": None, "serverca": None,
-            "target": "config-target"
-        }):
+        with patch(
+            "vibebuild.cli.load_koji_config",
+            return_value={
+                "server": None,
+                "web_url": None,
+                "cert": None,
+                "serverca": None,
+                "target": "config-target",
+            },
+        ):
             with patch("vibebuild.cli.ensure_srpm_path", return_value=str(srpm)):
                 with patch("vibebuild.cli.cmd_build") as mock_cmd:
                     mock_cmd.return_value = 0
@@ -891,9 +968,12 @@ class TestTrainSubcommand:
         mock_cat = mocker.patch(
             "vibebuild.training.collect_and_train",
             return_value={
-                "train_size": 100, "test_size": 10,
-                "predicted": 9, "coverage": 0.9,
-                "rpm_accuracy": 0.5, "srpm_accuracy": 0.7,
+                "train_size": 100,
+                "test_size": 10,
+                "predicted": 9,
+                "coverage": 0.9,
+                "rpm_accuracy": 0.5,
+                "srpm_accuracy": 0.7,
             },
         )
         rc = main(["train", "--release", "42", "--output", "/tmp/m.joblib"])

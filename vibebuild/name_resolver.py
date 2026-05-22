@@ -7,15 +7,13 @@ perl(File::Path)) to real RPM package names, and maps RPM names to possible SRPM
 
 import logging
 import re
-from typing import Optional
-
-from vibebuild.exceptions import NameResolutionError
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 # Try to import ML resolver; it may not be installed
 try:
-    from vibebuild.ml_resolver import MLPackageResolver
+    from vibebuild.ml_resolver import MLPackageResolver  # noqa: F401
 
     HAS_ML = True
 except ImportError:  # pragma: no cover
@@ -45,7 +43,7 @@ SYSTEM_MACROS: dict[str, str] = {
 
 # Regex patterns for resolving virtual RPM provides to real package names.
 # Each entry is (compiled_regex, replacement_function).
-PROVIDE_PATTERNS: list[tuple[re.Pattern, callable]] = [
+PROVIDE_PATTERNS: list[tuple[re.Pattern, Callable]] = [
     (
         re.compile(r"^python(\d*)dist\((.+)\)$"),
         lambda m: f"python{m.group(1) or '3'}-{m.group(2)}",
@@ -413,9 +411,14 @@ class PackageNameResolver:
         """
         s = name.strip()
         # Strip outer parentheses of boolean dep expressions
-        if s.startswith("(") and (" if " in s or " or " in s or " and " in s
-                                   or " unless " in s or " with " in s
-                                   or " without " in s):
+        if s.startswith("(") and (
+            " if " in s
+            or " or " in s
+            or " and " in s
+            or " unless " in s
+            or " with " in s
+            or " without " in s
+        ):
             s = s.lstrip("(").rstrip(")")
             # Take the first token before the boolean operator
             for keyword in (" if ", " unless ", " or ", " and ", " with ", " without "):
@@ -560,13 +563,13 @@ class PackageNameResolver:
 
         # Rule: python3-X -> try python-X first, then python3-X
         elif rpm_name.startswith("python3-"):
-            base = rpm_name[len("python3-"):]
+            base = rpm_name[len("python3-") :]
             candidates.append(f"python-{base}")
             candidates.append(rpm_name)
 
         # Rule: python2-X -> try python-X first
         elif rpm_name.startswith("python2-"):
-            base = rpm_name[len("python2-"):]
+            base = rpm_name[len("python2-") :]
             candidates.append(f"python-{base}")
             candidates.append(rpm_name)
 
@@ -641,7 +644,8 @@ class PackageNameResolver:
         Return a list of package names to try when downloading an SRPM.
 
         Used for both aliases (e.g. python3 -> python3.12) and virtual provides.
-        Order: ML prediction (srpm_name, rpm_name), rule-based resolve, resolve_srpm_name variants, then name.
+        Order: ML prediction (srpm_name, rpm_name), rule-based resolve,
+        resolve_srpm_name variants, then name.
 
         Args:
             name: Package name or alias (e.g. "python3", "python3dist(requests)")

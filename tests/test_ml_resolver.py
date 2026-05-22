@@ -1,18 +1,30 @@
 """Tests for vibebuild.ml_resolver module."""
 
 import json
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import MagicMock
 
-from vibebuild.ml_resolver import MLPackageResolver, HAS_SKLEARN
+import pytest
 
+from vibebuild.ml_resolver import MLPackageResolver
 
 # Sample training data that mimics real Fedora provides
 SAMPLE_TRAINING_DATA = [
-    {"provide": "python3dist(requests)", "rpm_name": "python3-requests", "srpm_name": "python-requests"},
-    {"provide": "python3dist(urllib3)", "rpm_name": "python3-urllib3", "srpm_name": "python-urllib3"},
-    {"provide": "python3dist(setuptools)", "rpm_name": "python3-setuptools", "srpm_name": "python-setuptools"},
+    {
+        "provide": "python3dist(requests)",
+        "rpm_name": "python3-requests",
+        "srpm_name": "python-requests",
+    },
+    {
+        "provide": "python3dist(urllib3)",
+        "rpm_name": "python3-urllib3",
+        "srpm_name": "python-urllib3",
+    },
+    {
+        "provide": "python3dist(setuptools)",
+        "rpm_name": "python3-setuptools",
+        "srpm_name": "python-setuptools",
+    },
     {"provide": "python3dist(pip)", "rpm_name": "python3-pip", "srpm_name": "python-pip"},
     {"provide": "python3dist(numpy)", "rpm_name": "python3-numpy", "srpm_name": "numpy"},
     {"provide": "python3dist(flask)", "rpm_name": "python3-flask", "srpm_name": "python-flask"},
@@ -26,7 +38,11 @@ SAMPLE_TRAINING_DATA = [
     {"provide": "perl(File::Path)", "rpm_name": "perl-File-Path", "srpm_name": "perl-File-Path"},
     {"provide": "perl(JSON::PP)", "rpm_name": "perl-JSON-PP", "srpm_name": "perl-JSON-PP"},
     {"provide": "cmake(Qt5Core)", "rpm_name": "qt5-qtbase-devel", "srpm_name": "qt5-qtbase"},
-    {"provide": "golang(github.com/stretchr/testify)", "rpm_name": "golang-github-stretchr-testify-devel", "srpm_name": "golang-github-stretchr-testify"},
+    {
+        "provide": "golang(github.com/stretchr/testify)",
+        "rpm_name": "golang-github-stretchr-testify-devel",
+        "srpm_name": "golang-github-stretchr-testify",
+    },
     {"provide": "rubygem(rake)", "rpm_name": "rubygem-rake", "srpm_name": "rubygem-rake"},
     {"provide": "npm(express)", "rpm_name": "nodejs-express", "srpm_name": "nodejs-express"},
     {"provide": "python3dist(click)", "rpm_name": "python3-click", "srpm_name": "python-click"},
@@ -63,9 +79,11 @@ def mock_sklearn(mocker):
     mocker.patch("vibebuild.ml_resolver.NearestNeighbors", mock_nn_cls, create=True)
 
     mock_joblib = MagicMock()
+
     def joblib_dump(data, path, **kwargs):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text("mock model")
+
     mock_joblib.dump.side_effect = joblib_dump
     mock_joblib.load.return_value = {
         "vectorizer": _make_mock_vectorizer(),
@@ -477,7 +495,9 @@ class TestMLPackageResolverConstructorWithModel:
         """Constructor should handle model load failure gracefully."""
         model_file = tmp_path / "bad_model.joblib"
         model_file.write_text("corrupt model data")
-        mocker.patch("vibebuild.ml_resolver.joblib.load", side_effect=Exception("corrupt"), create=True)
+        mocker.patch(
+            "vibebuild.ml_resolver.joblib.load", side_effect=Exception("corrupt"), create=True
+        )
 
         resolver = MLPackageResolver(model_path=str(model_file))
 

@@ -1,12 +1,11 @@
 """Tests for vibebuild.fetcher module."""
 
-import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-import subprocess
+from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
+from vibebuild.exceptions import SRPMNotFoundError
 from vibebuild.fetcher import SRPMFetcher, SRPMSource
-from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 
 
 class TestSRPMSource:
@@ -23,7 +22,7 @@ class TestSRPMSource:
             name="fedora",
             base_url="https://koji.fedoraproject.org",
             koji_server="https://koji.fedoraproject.org/kojihub",
-            priority=10
+            priority=10,
         )
 
         assert source.koji_server == "https://koji.fedoraproject.org/kojihub"
@@ -62,7 +61,7 @@ class TestSRPMFetcher:
         download_dir = tmp_path / "new_dir"
         assert not download_dir.exists()
 
-        fetcher = SRPMFetcher(download_dir=str(download_dir))
+        SRPMFetcher(download_dir=str(download_dir))
 
         assert download_dir.exists()
 
@@ -84,7 +83,12 @@ class TestSRPMFetcher:
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
         mock_server.getLatestBuilds.return_value = [
-            {"nvr": "test-pkg-1.0-1.fc40", "name": "test-pkg", "version": "1.0", "release": "1.fc40"}
+            {
+                "nvr": "test-pkg-1.0-1.fc40",
+                "name": "test-pkg",
+                "version": "1.0",
+                "release": "1.fc40",
+            }
         ]
         pkg_dir = tmp_path / "test-pkg"
         pkg_dir.mkdir()
@@ -100,7 +104,10 @@ class TestSRPMFetcher:
         mock_server = MagicMock()
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuild.return_value = {
-            "nvr": "test-pkg-1.0-1.fc40", "name": "test-pkg", "version": "1.0", "release": "1.fc40"
+            "nvr": "test-pkg-1.0-1.fc40",
+            "name": "test-pkg",
+            "version": "1.0",
+            "release": "1.fc40",
         }
         pkg_dir = tmp_path / "test-pkg"
         pkg_dir.mkdir()
@@ -118,7 +125,12 @@ class TestSRPMFetcher:
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
         mock_server.getLatestBuilds.return_value = [
-            {"nvr": "test-pkg-2.0-1.fc42", "name": "test-pkg", "version": "2.0", "release": "1.fc42"}
+            {
+                "nvr": "test-pkg-2.0-1.fc42",
+                "name": "test-pkg",
+                "version": "2.0",
+                "release": "1.fc42",
+            }
         ]
         pkg_dir = tmp_path / "test-pkg"
         pkg_dir.mkdir()
@@ -137,7 +149,14 @@ class TestSRPMFetcher:
         # First call (f42 tag) returns empty, second call (rawhide) returns build
         mock_server.getLatestBuilds.side_effect = [
             [],  # f42 tag
-            [{"nvr": "test-pkg-3.0-1.fc42", "name": "test-pkg", "version": "3.0", "release": "1.fc42"}],  # rawhide
+            [
+                {
+                    "nvr": "test-pkg-3.0-1.fc42",
+                    "name": "test-pkg",
+                    "version": "3.0",
+                    "release": "1.fc42",
+                }
+            ],  # rawhide
         ]
         pkg_dir = tmp_path / "test-pkg"
         pkg_dir.mkdir()
@@ -164,9 +183,14 @@ class TestSRPMFetcher:
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
         mock_server.getLatestBuilds.return_value = [
-            {"nvr": "test-pkg-1.0-1.fc40", "name": "test-pkg", "version": "1.0", "release": "1.fc40"}
+            {
+                "nvr": "test-pkg-1.0-1.fc40",
+                "name": "test-pkg",
+                "version": "1.0",
+                "release": "1.fc40",
+            }
         ]
-        mocker.patch.object(fetcher, '_download_file')
+        mocker.patch.object(fetcher, "_download_file")
         pkg_dir = tmp_path / "test-pkg"
         pkg_dir.mkdir()
         # Don't create the srpm file - simulates download failure
@@ -179,11 +203,7 @@ class TestSRPMFetcher:
         mock_requests = mocker.patch("vibebuild.fetcher.requests")
         mock_requests.get.return_value.status_code = 200
         mock_requests.get.return_value.json.return_value = {
-            "projects": [
-                {"name": "python3"},
-                {"name": "python3-devel"},
-                {"name": "python3-libs"}
-            ]
+            "projects": [{"name": "python3"}, {"name": "python3-devel"}, {"name": "python3-libs"}]
         }
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
 
@@ -275,7 +295,7 @@ Source0: test-pkg-1.0.tar.gz
         srpm_file = work_dir / "test-pkg-1.0-1.src.rpm"
         srpm_file.write_text("fake srpm")
 
-        with patch.object(fetcher, '_download_file'):
+        with patch.object(fetcher, "_download_file"):
             with patch("vibebuild.fetcher.Path.glob") as mock_glob:
                 mock_glob.return_value = [srpm_file]
                 result = fetcher.download_srpm("test-pkg")
@@ -295,10 +315,7 @@ Source0: test-pkg-1.0.tar.gz
     def test_search_fedora_src_with_requests(self, tmp_path, mock_requests):
         mock_requests.get.return_value.status_code = 200
         mock_requests.get.return_value.json.return_value = {
-            "projects": [
-                {"name": "python3"},
-                {"name": "python3-devel"}
-            ]
+            "projects": [{"name": "python3"}, {"name": "python3-devel"}]
         }
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
 
@@ -367,7 +384,10 @@ class TestSRPMFetcherDownloadWithNameResolver:
         mock_server = MagicMock()
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuild.return_value = {
-            "nvr": "python-requests-2.0-1", "name": "python-requests", "version": "2.0", "release": "1"
+            "nvr": "python-requests-2.0-1",
+            "name": "python-requests",
+            "version": "2.0",
+            "release": "1",
         }
         pkg_dir = tmp_path / "python-requests"
         pkg_dir.mkdir()
@@ -385,8 +405,12 @@ class TestSRPMFetcherKojiEdgeCases:
         """Connection error when connecting to Koji XML-RPC."""
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
         fetcher.sources = [
-            SRPMSource(name="koji", base_url="https://koji.internal",
-                       koji_server="https://koji.internal/kojihub", priority=1)
+            SRPMSource(
+                name="koji",
+                base_url="https://koji.internal",
+                koji_server="https://koji.internal/kojihub",
+                priority=1,
+            )
         ]
         mock_server = MagicMock()
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
@@ -401,8 +425,12 @@ class TestSRPMFetcherKojiEdgeCases:
         """Koji returns empty builds for package."""
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
         fetcher.sources = [
-            SRPMSource(name="koji", base_url="https://koji.internal",
-                       koji_server="https://koji.internal/kojihub", priority=1)
+            SRPMSource(
+                name="koji",
+                base_url="https://koji.internal",
+                koji_server="https://koji.internal/kojihub",
+                priority=1,
+            )
         ]
         mock_server = MagicMock()
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
@@ -416,16 +444,25 @@ class TestSRPMFetcherKojiEdgeCases:
         """Download failure should raise."""
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
         fetcher.sources = [
-            SRPMSource(name="koji", base_url="https://koji.internal",
-                       koji_server="https://koji.internal/kojihub", priority=1)
+            SRPMSource(
+                name="koji",
+                base_url="https://koji.internal",
+                koji_server="https://koji.internal/kojihub",
+                priority=1,
+            )
         ]
         mock_server = MagicMock()
         mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
         mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
         mock_server.getLatestBuilds.return_value = [
-            {"nvr": "test-pkg-1.0-1.fc40", "name": "test-pkg", "version": "1.0", "release": "1.fc40"}
+            {
+                "nvr": "test-pkg-1.0-1.fc40",
+                "name": "test-pkg",
+                "version": "1.0",
+                "release": "1.fc40",
+            }
         ]
-        mocker.patch.object(fetcher, '_download_file', side_effect=Exception("download error"))
+        mocker.patch.object(fetcher, "_download_file", side_effect=Exception("download error"))
 
         with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
             fetcher.download_srpm("test-pkg")
@@ -437,7 +474,9 @@ class TestSRPMFetcherSrcEdgeCases:
         mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
         mock_requests = mocker.patch("vibebuild.fetcher.requests")
         mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = "Name: test\nVersion: 1.0\nRelease: 1\nSource0: https://example.internal/test-1.0.tar.gz\n"
+        mock_requests.get.return_value.text = (
+            "Name: test\nVersion: 1.0\nRelease: 1\nSource0: https://example.internal/test-1.0.tar.gz\n"
+        )
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
         fetcher.sources = [
             SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
@@ -448,7 +487,7 @@ class TestSRPMFetcherSrcEdgeCases:
         srpm_file = work_dir / "test-1.0-1.src.rpm"
         srpm_file.write_text("fake srpm")
 
-        with patch.object(fetcher, '_download_file'):
+        with patch.object(fetcher, "_download_file"):
             with patch("vibebuild.fetcher.Path.glob") as mock_glob:
                 mock_glob.return_value = [srpm_file]
                 result = fetcher.download_srpm("test")
@@ -460,7 +499,9 @@ class TestSRPMFetcherSrcEdgeCases:
         mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
         mock_requests = mocker.patch("vibebuild.fetcher.requests")
         mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = "Name: test\nVersion: 1.0\nRelease: 1\nSource0: local-file.tar.gz\n"
+        mock_requests.get.return_value.text = (
+            "Name: test\nVersion: 1.0\nRelease: 1\nSource0: local-file.tar.gz\n"
+        )
         fetcher = SRPMFetcher(download_dir=str(tmp_path))
         fetcher.sources = [
             SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
@@ -471,7 +512,7 @@ class TestSRPMFetcherSrcEdgeCases:
         srpm_file = work_dir / "test-1.0-1.src.rpm"
         srpm_file.write_text("fake srpm")
 
-        with patch.object(fetcher, '_download_file', side_effect=Exception("download failed")):
+        with patch.object(fetcher, "_download_file", side_effect=Exception("download failed")):
             with patch("vibebuild.fetcher.Path.glob") as mock_glob:
                 mock_glob.return_value = [srpm_file]
                 result = fetcher.download_srpm("test")

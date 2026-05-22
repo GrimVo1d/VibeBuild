@@ -1,6 +1,7 @@
 """
 Dependency resolver - checks dependencies in Koji and builds DAG.
 """
+
 from __future__ import annotations
 
 import logging
@@ -8,7 +9,7 @@ import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from vibebuild._retry import with_retry
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
@@ -299,7 +300,10 @@ class DependencyResolver:
         if not result:
             logger.debug(
                 "version check fail: %s has %s but requires %s %s",
-                package, latest["nvr"], required_op, required_ver,
+                package,
+                latest["nvr"],
+                required_op,
+                required_ver,
             )
         return result
 
@@ -357,7 +361,9 @@ class DependencyResolver:
                     continue
                 logger.info(
                     "  %s: version constraint %s %s is not satisfied by the current build",
-                    resolved_name, required_op, required_ver,
+                    resolved_name,
+                    required_op,
+                    required_ver,
                 )
                 missing.append(resolved_name)
                 continue
@@ -367,7 +373,9 @@ class DependencyResolver:
                     continue
                 logger.info(
                     "  %s: version constraint %s %s is not satisfied",
-                    resolved_name, required_op, required_ver,
+                    resolved_name,
+                    required_op,
+                    required_ver,
                 )
                 missing.append(resolved_name)
                 continue
@@ -417,7 +425,7 @@ class DependencyResolver:
         return missing
 
     def build_dependency_graph(
-        self, root_package: str, srpm_path: str, srpm_resolver: Optional[callable] = None
+        self, root_package: str, srpm_path: str, srpm_resolver: Optional[Callable] = None
     ) -> dict[str, DependencyNode]:
         """
         Build complete dependency graph starting from root package.
@@ -526,7 +534,9 @@ class DependencyResolver:
         while queue:
             pkg = queue.pop(0)
 
-            if pkg in self._dependency_graph and not self._dependency_graph[pkg].is_available:  # pragma: no branch
+            if (
+                pkg in self._dependency_graph and not self._dependency_graph[pkg].is_available
+            ):  # pragma: no branch
                 result.append(pkg)
                 self._dependency_graph[pkg].build_order = order
                 order += 1

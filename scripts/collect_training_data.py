@@ -56,9 +56,7 @@ def discover_mirror(release: int, arch: str) -> Optional[str]:
     Returns:
         Base URL of a mirror, or None if discovery fails.
     """
-    metalink_url = (
-        f"https://mirrors.fedoraproject.org/metalink?repo=fedora-{release}&arch={arch}"
-    )
+    metalink_url = f"https://mirrors.fedoraproject.org/metalink?repo=fedora-{release}&arch={arch}"
     logger.info("Fetching metalink from %s", metalink_url)
 
     try:
@@ -94,7 +92,9 @@ def discover_mirror(release: int, arch: str) -> Optional[str]:
         logger.error("Failed to parse metalink XML: %s", e)
 
     # Well-known fallback
-    fallback = f"https://dl.fedoraproject.org/pub/fedora/linux/releases/{release}/Everything/{arch}/os"
+    fallback = (
+        f"https://dl.fedoraproject.org/pub/fedora/linux/releases/{release}/Everything/{arch}/os"
+    )
     logger.info("Using fallback mirror: %s", fallback)
     return fallback
 
@@ -223,11 +223,13 @@ def download_and_parse_primary(primary_url: str) -> list[dict]:
                         for entry in provides_elem.findall(f"{{{RPM_NS}}}entry"):
                             provide_name = entry.get("name", "")
                             if _is_interesting_provide(provide_name, rpm_name):
-                                mappings.append({
-                                    "provide": provide_name,
-                                    "rpm_name": rpm_name,
-                                    "srpm_name": srpm_name,
-                                })
+                                mappings.append(
+                                    {
+                                        "provide": provide_name,
+                                        "rpm_name": rpm_name,
+                                        "srpm_name": srpm_name,
+                                    }
+                                )
 
                 # Free memory
                 elem.clear()
@@ -327,11 +329,13 @@ def collect_via_dnf(release: int, arch: str) -> list[dict]:
         # Get all provides
         result = subprocess.run(
             [
-                "dnf", "repoquery",
+                "dnf",
+                "repoquery",
                 f"--releasever={release}",
                 f"--forcearch={arch}",
                 "--provides",
-                "--queryformat", "%{name}|%{sourcerpm}|%{provides}",
+                "--queryformat",
+                "%{name}|%{sourcerpm}|%{provides}",
                 "*",
             ],
             capture_output=True,
@@ -368,11 +372,13 @@ def collect_via_dnf(release: int, arch: str) -> list[dict]:
             key = (provide_name, rpm_name)
             if key not in seen:
                 seen.add(key)
-                mappings.append({
-                    "provide": provide_name,
-                    "rpm_name": rpm_name,
-                    "srpm_name": srpm_name,
-                })
+                mappings.append(
+                    {
+                        "provide": provide_name,
+                        "rpm_name": rpm_name,
+                        "srpm_name": srpm_name,
+                    }
+                )
 
     logger.info("Collected %d mappings via dnf repoquery", len(mappings))
     return mappings

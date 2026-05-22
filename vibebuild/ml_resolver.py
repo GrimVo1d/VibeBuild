@@ -10,15 +10,14 @@ scikit-learn is an optional dependency - the resolver degrades gracefully if not
 import hashlib
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Optional
 
 try:
+    import joblib  # pragma: no cover
     from sklearn.feature_extraction.text import TfidfVectorizer  # pragma: no cover
     from sklearn.neighbors import NearestNeighbors  # pragma: no cover
-    import joblib  # pragma: no cover
 
     HAS_SKLEARN = True  # pragma: no cover
 except ImportError:  # pragma: no cover
@@ -168,9 +167,7 @@ class MLPackageResolver:
 
         self._model_loaded = True
         vocab_size = len(self._vectorizer.vocabulary_)
-        logger.info(
-            "Model trained: %d samples, vocabulary size %d", len(data), vocab_size
-        )
+        logger.info("Model trained: %d samples, vocabulary size %d", len(data), vocab_size)
 
     def predict(self, dep_name: str) -> Optional[dict]:
         """
@@ -201,7 +198,9 @@ class MLPackageResolver:
         if best_distance > self.confidence_threshold:
             logger.debug(
                 "Prediction for '%s' below confidence threshold (best=%.3f > %.3f)",
-                dep_name, best_distance, self.confidence_threshold,
+                dep_name,
+                best_distance,
+                self.confidence_threshold,
             )
             return None
         best_srpm = self._srpm_names[int(indices[0][0])]

@@ -350,17 +350,13 @@ def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:
         except subprocess.TimeoutExpired as exc:
             p1.kill()
             p2.kill()
-            raise InvalidSRPMError(
-                f"Unpacking SRPM {srpm_path} timed out"
-            ) from exc
+            raise InvalidSRPMError(f"Unpacking SRPM {srpm_path} timed out") from exc
 
     if p1.returncode != 0:
         raise InvalidSRPMError(
-            f"rpm2cpio failed for {srpm_path}: "
-            f"{rpm2cpio_err.decode(errors='replace').strip()}"
+            f"rpm2cpio failed for {srpm_path}: " f"{rpm2cpio_err.decode(errors='replace').strip()}"
         )
     if p2.returncode != 0:
         raise InvalidSRPMError(
-            f"cpio failed to unpack {srpm_path}: "
-            f"{cpio_err.decode(errors='replace').strip()}"
+            f"cpio failed to unpack {srpm_path}: " f"{cpio_err.decode(errors='replace').strip()}"
         )

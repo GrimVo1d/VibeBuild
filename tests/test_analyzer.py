@@ -1,8 +1,8 @@
 """Tests for vibebuild.analyzer module."""
 
+from unittest.mock import Mock, patch
+
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
 
 from vibebuild.analyzer import (
     BuildRequirement,
@@ -53,11 +53,7 @@ class TestBuildRequirement:
 class TestPackageInfo:
     def test_nvr_property(self):
         info = PackageInfo(
-            name="test-package",
-            version="1.0.0",
-            release="1",
-            build_requires=[],
-            source_urls=[]
+            name="test-package", version="1.0.0", release="1", build_requires=[], source_urls=[]
         )
 
         assert info.nvr == "test-package-1.0.0-1"
@@ -146,13 +142,15 @@ class TestSpecAnalyzer:
 
     def test_analyze_spec_ignores_comments(self, tmp_path):
         spec = tmp_path / "commented.spec"
-        spec.write_text("""
+        spec.write_text(
+            """
 Name: test-pkg
 Version: 1.0
 Release: 1
 # BuildRequires: should-be-ignored
 BuildRequires: actual-dep
-""")
+"""
+        )
         analyzer = SpecAnalyzer()
 
         result = analyzer.analyze_spec(str(spec))
@@ -174,12 +172,14 @@ BuildRequires: actual-dep
 
     def test_analyze_spec_expands_macros(self, tmp_path):
         spec = tmp_path / "macro.spec"
-        spec.write_text("""
+        spec.write_text(
+            """
 Name: my-package
 Version: 2.0
 Release: 1
 Source0: %{name}-%{version}.tar.gz
-""")
+"""
+        )
         analyzer = SpecAnalyzer()
 
         result = analyzer.analyze_spec(str(spec))
@@ -217,12 +217,11 @@ class TestGetBuildRequires:
 
     def test_raises_on_rpm2cpio_failure(self, tmp_path, mock_subprocess_run):
         import subprocess
+
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm content")
         mock_subprocess_run.side_effect = subprocess.CalledProcessError(
-            returncode=1,
-            cmd=['rpm2cpio'],
-            stderr=b"rpm2cpio failed"
+            returncode=1, cmd=["rpm2cpio"], stderr=b"rpm2cpio failed"
         )
 
         with pytest.raises(InvalidSRPMError, match="Failed to extract"):
@@ -331,7 +330,9 @@ class TestSpecAnalyzerBranchCoverage:
     def test_build_requires_macro_expands_to_empty(self, tmp_path):
         """BuildRequires with macro that expands to empty should be skipped."""
         spec = tmp_path / "macro_empty.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: %{?nonexistent_macro}\n")
+        spec.write_text(
+            "Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: %{?nonexistent_macro}\n"
+        )
         analyzer = SpecAnalyzer()
 
         result = analyzer.analyze_spec(str(spec))
