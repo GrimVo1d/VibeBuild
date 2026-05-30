@@ -178,6 +178,19 @@ class TestPackageNameResolverSRPMNames:
 
         assert result == ["python-six", "python2-six"]
 
+    def test_resolve_srpm_name_python_prefix_fallback(self):
+        # Many Fedora SRPMs drop the python- prefix (pyyaml, pytest, trustme).
+        # Without this rule prod_validation fetch fails on those packages.
+        resolver = PackageNameResolver()
+
+        assert resolver.resolve_srpm_name("python-pyyaml") == ["python-pyyaml", "pyyaml"]
+        assert resolver.resolve_srpm_name("python-pytest") == ["python-pytest", "pytest"]
+        # The python3- rule above must keep its existing order (regression guard).
+        assert resolver.resolve_srpm_name("python3-requests") == [
+            "python-requests",
+            "python3-requests",
+        ]
+
     def test_resolve_srpm_name_devel(self):
         resolver = PackageNameResolver()
 

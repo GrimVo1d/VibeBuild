@@ -573,6 +573,16 @@ class PackageNameResolver:
             candidates.append(f"python-{base}")
             candidates.append(rpm_name)
 
+        # Rule: python-X (SRPM-style, no version digit) -> try python-X first,
+        # then X without prefix. Some Fedora SRPMs drop the python- prefix
+        # (pyyaml, pytest, trustme), so this fallback fills the gap that
+        # caused fetch failures in prod_validation.
+        elif rpm_name.startswith("python-"):
+            base = rpm_name[len("python-") :]
+            candidates.append(rpm_name)
+            if base:
+                candidates.append(base)
+
         # Rule: *-devel -> try without -devel suffix
         elif rpm_name.endswith("-devel"):
             base = rpm_name[: -len("-devel")]

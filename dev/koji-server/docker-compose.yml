@@ -23,7 +23,7 @@ services:
     ports:
       - "${KOJI_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./ssl:/etc/pki/koji:ro
+      - ./ssl:/etc/pki/koji:ro,Z
       - koji-data:/mnt/koji
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-koji}
@@ -44,7 +44,7 @@ services:
       koji-hub:
         condition: service_healthy
     volumes:
-      - ./ssl:/etc/pki/koji:ro
+      - ./ssl:/etc/pki/koji:ro,Z
       - koji-data:/mnt/koji
     privileged: true
     networks:
@@ -57,7 +57,7 @@ services:
         condition: service_healthy
     volumes:
       - ../..:/workspace
-      - ./ssl:/etc/pki/koji:ro
+      - ./ssl:/etc/pki/koji:ro,Z
       - vibebuild-cache:/root/.cache/vibebuild
     networks:
       - koji-net

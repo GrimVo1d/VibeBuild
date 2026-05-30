@@ -9,6 +9,11 @@ source .env
 
 COMPOSE="docker compose"
 
+# Detect host architecture so the dev stand works on both amd64 and arm64.
+# Override with KOJI_ARCH=<arch> in environment if a cross-arch koji is wanted.
+KOJI_ARCH="${KOJI_ARCH:-$(uname -m)}"
+echo "==> Using KOJI_ARCH=${KOJI_ARCH}"
+
 echo "==> Waiting for Koji Hub to be ready..."
 for i in $(seq 1 60); do
     if $COMPOSE exec -T koji-hub curl -sk https://localhost/kojihub >/dev/null 2>&1; then
@@ -47,12 +52,12 @@ conn.close()
 " 2>/dev/null || echo "    (admin user may already exist)"
 
 echo "==> Adding builder host..."
-koji_exec add-host kojibuilder x86_64 2>/dev/null || echo "    (host may already exist)"
+koji_exec add-host kojibuilder "${KOJI_ARCH}" 2>/dev/null || echo "    (host may already exist)"
 koji_exec add-host-to-channel kojibuilder createrepo 2>/dev/null || echo "    (channel assignment may already exist)"
 
 echo "==> Creating tags..."
-koji_exec add-tag ${KOJI_TAG} --arches=x86_64 2>/dev/null || echo "    (tag ${KOJI_TAG} may already exist)"
-koji_exec add-tag ${KOJI_BUILD_TAG} --parent=${KOJI_TAG} --arches=x86_64 2>/dev/null || echo "    (tag ${KOJI_BUILD_TAG} may already exist)"
+koji_exec add-tag ${KOJI_TAG} --arches="${KOJI_ARCH}" 2>/dev/null || echo "    (tag ${KOJI_TAG} may already exist)"
+koji_exec add-tag ${KOJI_BUILD_TAG} --parent=${KOJI_TAG} --arches="${KOJI_ARCH}" 2>/dev/null || echo "    (tag ${KOJI_BUILD_TAG} may already exist)"
 
 echo "==> Creating build target..."
 koji_exec add-target ${KOJI_TARGET} ${KOJI_BUILD_TAG} ${KOJI_TAG} 2>/dev/null || echo "    (target may already exist)"

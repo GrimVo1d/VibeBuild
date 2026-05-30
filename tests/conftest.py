@@ -184,3 +184,13 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: mark test as unit test")
     config.addinivalue_line("markers", "integration: mark test as integration test")
     config.addinivalue_line("markers", "slow: mark test as slow running")
+
+
+def pytest_collection_modifyitems(config, items):
+    # Default classification: a test is unit unless explicitly marked
+    # integration or slow. Lets `pytest -m unit` work as the docs promise
+    # without forcing every test author to add the marker by hand.
+    for item in items:
+        explicit = {m.name for m in item.iter_markers()}
+        if not explicit & {"integration", "slow"}:
+            item.add_marker("unit")
