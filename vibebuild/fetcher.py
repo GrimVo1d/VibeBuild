@@ -155,7 +155,9 @@ class SRPMFetcher:
         self, package_name: str, version: Optional[str], source: SRPMSource
     ) -> str:
         """Download SRPM from Koji using XML-RPC API (no CLI needed)."""
-        import xmlrpc.client
+        # The Koji hub is a trusted source (TLS + CA from ~/.koji/config),
+        # spoofing the response would require a MITM with a trusted CA.
+        import xmlrpc.client  # nosec B411
 
         try:
             server = xmlrpc.client.ServerProxy(source.koji_server, allow_none=True)
