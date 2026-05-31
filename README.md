@@ -2,7 +2,9 @@
 
 **Koji extension for automatic dependency resolution and building**
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/downloads/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://www.conventionalcommits.org/)
 
 VibeBuild extends Koji with automatic dependency resolution. When building a package, VibeBuild finds the missing BuildRequires, downloads their SRPMs from Fedora and builds the whole dependency chain in the right order.
 
