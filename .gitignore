@@ -46,6 +46,7 @@ Thumbs.db
 
 # VibeBuild specific
 /downloads/
+/logs/
 *.src.rpm
 *.rpm
 vibebuild/data/*.joblib

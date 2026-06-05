@@ -68,6 +68,8 @@ vibebuild --no-name-resolution fedora-target my-package.src.rpm # raw names
 vibebuild --ml-model /path/to/model.joblib fedora-target my-package.src.rpm
 ```
 
+A step-by-step demo (download, analysis, dry-run, build) is in the "First build: step by step" section of [QUICKSTART.md](docs/QUICKSTART.md#7-first-build-step-by-step).
+
 ### Verification
 
 After installing, you can check that everything works:
@@ -207,4 +209,5 @@ The model uses TF-IDF character n-grams with K-Nearest Neighbors to predict real
 
 ## Documentation
 
+- [QUICKSTART.md](docs/QUICKSTART.md) — introduction from scratch: RPM/SRPM/Koji concepts, modules, first build step by step
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — system architecture
