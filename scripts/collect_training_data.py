@@ -69,10 +69,15 @@ def discover_mirror(release: int, arch: str) -> Optional[str]:
 
     try:
         root = ET.fromstring(content)
-        # Try to find URLs in metalink XML
+        # Try to find URLs in metalink XML.
+        # Filter by http(s): metalink also lists rsync:// and ftp:// which urlopen can't handle.
         for url_elem in root.iter(f"{{{METALINK_NS}}}url"):
             url = url_elem.text
-            if url and url.endswith("/repodata/repomd.xml"):
+            if (
+                url
+                and url.startswith(("http://", "https://"))
+                and url.endswith("/repodata/repomd.xml")
+            ):
                 base_url = url.rsplit("/repodata/repomd.xml", 1)[0]
                 logger.info("Discovered mirror: %s", base_url)
                 return base_url
@@ -80,7 +85,7 @@ def discover_mirror(release: int, arch: str) -> Optional[str]:
         # Fallback: look for any http URL in resources
         for url_elem in root.iter(f"{{{METALINK_NS}}}url"):
             url = url_elem.text
-            if url and url.startswith("http"):
+            if url and url.startswith(("http://", "https://")):
                 # Strip trailing path to get base
                 if "/repodata/" in url:
                     base_url = url.rsplit("/repodata/", 1)[0]
@@ -328,12 +333,13 @@ def collect_via_dnf(release: int, arch: str) -> list[dict]:
     try:
         # Get all provides
         result = subprocess.run(
+            # dnf5 disallows combining --provides with --queryformat;
+            # %{provides} inside the format string already yields the data.
             [
                 "dnf",
                 "repoquery",
                 f"--releasever={release}",
                 f"--forcearch={arch}",
-                "--provides",
                 "--queryformat",
                 "%{name}|%{sourcerpm}|%{provides}",
                 "*",
@@ -353,30 +359,41 @@ def collect_via_dnf(release: int, arch: str) -> list[dict]:
     mappings = []
     seen = set()
 
+    # %{provides} expands to one provide per line, so a single package produces
+    # one header line `name|sourcerpm|first-provide` followed by continuation lines
+    # without delimiters. Track the current package across continuations.
+    cur_rpm: Optional[str] = None
+    cur_srpm: Optional[str] = None
+
     for line in result.stdout.strip().split("\n"):
         line = line.strip()
-        if not line or "|" not in line:
+        if not line:
             continue
 
-        parts = line.split("|", 2)
-        if len(parts) < 3:
+        if "|" in line:
+            parts = line.split("|", 2)
+            if len(parts) < 3:
+                continue
+            cur_rpm = parts[0]
+            cur_srpm = _parse_srpm_name(parts[1]) if parts[1] else cur_rpm
+            provide_name = parts[2].strip()
+        else:
+            if cur_rpm is None:
+                continue
+            provide_name = line
+
+        if not provide_name:
             continue
 
-        rpm_name = parts[0]
-        srpm_full = parts[1]
-        provide_name = parts[2].strip()
-
-        srpm_name = _parse_srpm_name(srpm_full) if srpm_full else rpm_name
-
-        if _is_interesting_provide(provide_name, rpm_name):
-            key = (provide_name, rpm_name)
+        if _is_interesting_provide(provide_name, cur_rpm):
+            key = (provide_name, cur_rpm)
             if key not in seen:
                 seen.add(key)
                 mappings.append(
                     {
                         "provide": provide_name,
-                        "rpm_name": rpm_name,
-                        "srpm_name": srpm_name,
+                        "rpm_name": cur_rpm,
+                        "srpm_name": cur_srpm or cur_rpm,
                     }
                 )
 
