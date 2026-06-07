@@ -66,9 +66,14 @@ echo "==> Adding build groups to ${KOJI_BUILD_TAG}..."
 koji_exec add-group ${KOJI_BUILD_TAG} build 2>/dev/null || true
 koji_exec add-group ${KOJI_BUILD_TAG} srpm-build 2>/dev/null || true
 
-BUILD_PKGS="bash bzip2 coreutils cpio diffutils fedora-release findutils gawk gcc gcc-c++ \
+BUILD_PKGS="bash bzip2 coreutils cpio diffutils fedora-release findutils gawk \
+gcc gcc-c++ \
+golang \
+rust cargo \
+cmake meson ninja-build \
+autoconf automake libtool pkgconf-pkg-config \
 grep gzip info make patch rpm-build redhat-rpm-config sed shadow-utils tar unzip util-linux \
-which xz"
+which xz createrepo_c"
 
 SRPM_BUILD_PKGS="bash fedora-release rpm-build redhat-rpm-config shadow-utils"
 

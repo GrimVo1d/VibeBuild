@@ -11,11 +11,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from vibebuild.analyzer import get_package_info_from_srpm
+from vibebuild.analyzer import get_build_requires, get_package_info_from_srpm
 from vibebuild.exceptions import KojiBuildError, KojiConnectionError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.name_resolver import PackageNameResolver
 from vibebuild.resolver import DependencyResolver, KojiClient
+from vibebuild.toolchain import detect_toolchains
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,9 @@ class BuildResult:
     failed_packages: list[str] = field(default_factory=list)
     built_packages: list[str] = field(default_factory=list)
     total_time: float = 0.0
+    toolchains: list[str] = field(default_factory=list)
+    tagged_target: Optional[str] = None
+    tagged_deps: list[str] = field(default_factory=list)
 
 
 class KojiBuilder:
@@ -587,12 +591,48 @@ class KojiBuilder:
                 result.failed_packages.append(package_info.name)
                 result.success = False
 
+        result.toolchains = self._collect_toolchains(package_info.build_requires)
+        self._populate_tagged_builds(result, package_info.name)
+
         result.total_time = time.time() - start_time
 
         logger.info(f"VibeBuild complete in {result.total_time:.1f}s")
         logger.info(f"Built: {len(result.built_packages)}, Failed: {len(result.failed_packages)}")
 
         return result
+
+    def _collect_toolchains(self, root_build_requires) -> list[str]:
+        """Aggregate BR from root + every built dep, classify via detect_toolchains."""
+        names: list[str] = [
+            br.name if hasattr(br, "name") else str(br) for br in root_build_requires
+        ]
+        for node in self.resolver._dependency_graph.values():
+            if not node.srpm_path:
+                continue
+            try:
+                names.extend(get_build_requires(node.srpm_path))
+            except Exception as exc:
+                logger.debug("get_build_requires(%s) failed: %s", node.srpm_path, exc)
+        return detect_toolchains(names)
+
+    def _populate_tagged_builds(self, result: BuildResult, target_name: str) -> None:
+        """Query koji list-tagged --latest <dest-tag> and split target vs deps."""
+        try:
+            tagged = self.koji_client.list_tagged_builds(self.target)
+        except Exception as exc:
+            logger.warning("list-tagged for %s failed: %s", self.target, exc)
+            return
+        result.tagged_target = tagged.get(target_name)
+        if target_name in result.built_packages and not result.tagged_target:
+            logger.warning("target %s built, but not found in tag %s", target_name, self.target)
+        for pkg in result.built_packages:
+            if pkg == target_name:
+                continue
+            nvr = tagged.get(pkg)
+            if nvr:
+                result.tagged_deps.append(nvr)
+            else:
+                logger.warning("dep %s built, but not found in tag %s", pkg, self.target)
 
     def build_chain(self, packages: list[tuple[str, str]]) -> BuildResult:
         """

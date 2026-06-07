@@ -1,4 +1,4 @@
-.PHONY: setup stop logs clean certs init client
+.PHONY: setup stop logs clean certs init client regen-repo
 
 COMPOSE = docker compose
 
@@ -43,3 +43,6 @@ init:
 
 client:
 	@bash scripts/setup-client.sh
+
+regen-repo:
+	@bash scripts/regen-repo.sh
