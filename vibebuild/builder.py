@@ -4,18 +4,21 @@ Koji builder - orchestrates package builds with dependency resolution.
 
 import logging
 import os
-import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import koji  # type: ignore[import-untyped]
+
 from vibebuild.analyzer import get_build_requires, get_package_info_from_srpm
-from vibebuild.exceptions import KojiBuildError, KojiConnectionError
+from vibebuild.exceptions import KojiBuildError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.name_resolver import PackageNameResolver
 from vibebuild.resolver import DependencyResolver, KojiClient
+from vibebuild.spec_patcher import patch_srpm
 from vibebuild.toolchain import detect_toolchains
 
 logger = logging.getLogger(__name__)
@@ -158,6 +161,7 @@ class KojiBuilder:
         )
 
         self._tasks: list[BuildTask] = []
+        self._session: Optional["koji.ClientSession"] = None
 
     def _get_env(self) -> Optional[dict]:
         """Get environment variables for subprocess, with SSL verification disabled if needed."""
@@ -169,25 +173,35 @@ class KojiBuilder:
             return env
         return None
 
-    def _run_koji(self, *args, timeout: int = 60) -> subprocess.CompletedProcess:
-        """Run koji command with configured options."""
-        cmd = ["koji", f"--server={self.koji_server}"]
+    # ---- single koji session for the whole build_with_deps / build_package -------
+    # koji-hub serializes RPCs under one user: two adjacent logins
+    # under `kojiadmin` hit `AuthLockError`. So within a single build
+    # we keep one logged-in ClientSession and route all calls through it.
+    # ----------------------------------------------------------------------
 
-        if self.cert:
-            cmd.append(f"--cert={self.cert}")
-        # Note: --serverca is not supported on RHEL9/older koji CLI.
-        # The serverca is read from ~/.koji/config instead.
+    def _open_session(self) -> "koji.ClientSession":
+        """Create and authenticate a persistent ClientSession."""
+        opts = {"no_ssl_verify": True} if self.no_ssl_verify else {}
+        session = koji.ClientSession(self.koji_server, opts=opts)
+        session.ssl_login(self.cert, self.serverca, self.serverca)
+        self._session = session
+        return session
 
-        cmd.extend(args)
-
-        logger.debug(f"Running: {' '.join(cmd)}")
-
+    def _close_session(self) -> None:
+        """Log out and reset the current session (silently, if there is none)."""
+        if self._session is None:
+            return
         try:
-            return subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, env=self._get_env()
-            )
-        except subprocess.TimeoutExpired:
-            raise KojiConnectionError(f"Command timed out: {' '.join(args)}")
+            self._session.logout()
+        except Exception:  # noqa: BLE001
+            pass
+        self._session = None
+
+    def _get_session(self) -> "koji.ClientSession":
+        """Return the current session or open a new one on demand."""
+        if self._session is None:
+            self._open_session()
+        return self._session  # type: ignore[return-value]
 
     def _submit_build(self, srpm_path: str) -> BuildTask:
         """
@@ -205,6 +219,20 @@ class KojiBuilder:
         srpm_path = Path(srpm_path)
         if not srpm_path.exists():
             raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+
+        # By default patch the spec in all SRPMs before sending to koji:
+        # strip %check and add _unpackaged_files_terminate_build 0.
+        # See vibebuild/spec_patcher.py: this replaces running the upstream testsuite
+        # in our sandbox mock.
+        try:
+            patched = patch_srpm(str(srpm_path), Path(self.fetcher.download_dir))
+            srpm_path = Path(patched)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "spec patching skipped for %s: %s — using original SRPM",
+                srpm_path.name,
+                exc,
+            )
 
         package_info = get_package_info_from_srpm(str(srpm_path))
 
@@ -238,53 +266,49 @@ class KojiBuilder:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("idempotency check skipped: %s", exc)
 
-        # Ensure the package is registered in the destination tag
         dest_tag = self.target  # e.g. "f42"
-        add_result = self._run_koji(
-            "add-pkg",
-            dest_tag,
-            package_info.name,
-            "--owner=kojiadmin",
-            timeout=120,
-        )
-        if add_result.returncode != 0:
-            # Ignore "already exists" errors
-            if "already exists" not in (add_result.stderr or ""):
-                logger.warning(f"add-pkg failed (may already exist): {add_result.stderr}")
-
-        # Always submit with --nowait
-        cmd_args = ["build", "--nowait"]
-
-        if self.scratch:
-            cmd_args.append("--scratch")
-
-        cmd_args.extend([self.target, str(srpm_path)])
-
         logger.info(f"Starting build: {package_info.nvr}")
 
-        result = self._run_koji(*cmd_args, timeout=60)
-
-        if result.returncode != 0:
+        try:
+            task.task_id = self._submit_via_session(srpm_path, package_info.name, dest_tag)
+        except KojiBuildError:
             task.status = BuildStatus.FAILED
-            task.error_message = result.stderr
-            raise KojiBuildError(f"Build failed: {result.stderr}")
-
-        for line in result.stdout.split("\n"):
-            if "Created task:" in line:
-                try:
-                    task.task_id = int(line.split(":")[-1].strip())
-                except ValueError:
-                    pass
-            elif "Task info:" in line:
-                try:
-                    task.task_id = int(line.split("=")[-1].strip())
-                except ValueError:
-                    pass
+            raise
+        except Exception as exc:  # noqa: BLE001
+            task.status = BuildStatus.FAILED
+            task.error_message = str(exc)
+            raise KojiBuildError(f"Build failed: {exc}")
 
         logger.info(f"Build submitted: task_id={task.task_id}")
         task.status = BuildStatus.BUILDING
 
         return task
+
+    def _submit_via_session(
+        self, srpm_path: Path, package_name: str, dest_tag: str
+    ) -> int:
+        """Through the persistent session do add-pkg + uploadWrapper + build atomically.
+
+        Takes the current `self._session` (opens a new one if there is none). Does
+        not close the session: the lifecycle owner is `build_with_deps` / `build_package`.
+        """
+        session = self._get_session()
+        try:
+            session.packageListAdd(dest_tag, package_name, owner="kojiadmin")
+        except koji.GenericError as exc:
+            if "already" not in str(exc).lower():
+                raise KojiBuildError(f"packageListAdd failed: {exc}")
+
+        server_dir = f"cli-build/vibebuild-{uuid.uuid4().hex[:12]}"
+        session.uploadWrapper(str(srpm_path), server_dir)
+        server_srpm = f"{server_dir}/{srpm_path.name}"
+
+        build_opts: dict = {"scratch": True} if self.scratch else {}
+        try:
+            task_id = session.build(server_srpm, self.target, build_opts)
+        except koji.GenericError as exc:
+            raise KojiBuildError(f"session.build failed: {exc}")
+        return int(task_id)
 
     def build_package(self, srpm_path: str, wait: bool = True) -> BuildTask:
         """
@@ -297,73 +321,81 @@ class KojiBuilder:
         Returns:
             BuildTask with result information
         """
-        task = self._submit_build(srpm_path)
+        own_session = self._session is None
+        if own_session:
+            self._open_session()
+        try:
+            task = self._submit_build(srpm_path)
 
-        if wait and not self.nowait and task.task_id:
-            task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
-        elif wait and not self.nowait:
-            task.status = BuildStatus.COMPLETE
+            if wait and not self.nowait and task.task_id:
+                task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
+            elif wait and not self.nowait:
+                task.status = BuildStatus.COMPLETE
 
-        return task
+            return task
+        finally:
+            if own_session:
+                self._close_session()
+
+    # koji task-state numeric codes -> names.
+    _KOJI_TASK_STATES = {
+        0: "free",
+        1: "open",
+        2: "closed",
+        3: "canceled",
+        4: "assigned",
+        5: "failed",
+    }
+
+    @classmethod
+    def _state_name(cls, state_int: Optional[int]) -> str:
+        return cls._KOJI_TASK_STATES.get(state_int or -1, "unknown")
 
     def _poll_build(
         self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30
     ) -> BuildStatus:
-        """Poll a build task with progress logging.
-
-        `interval` is accepted as the maximum interval; the real interval is
-        adaptive: short at the start (quick reaction to fast builds),
-        growing over time (saves requests to koji on long builds).
-        """
+        """Poll a build task with a progress log via the persistent ClientSession."""
+        session = self._get_session()
         start = time.time()
         last_state = ""
 
         while time.time() - start < timeout:
-            result = self._run_koji("taskinfo", str(task_id), timeout=120)
-            if result.returncode != 0:
-                logger.warning(f"  [{nvr}] Could not get task info")
+            try:
+                info = session.getTaskInfo(task_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"  [{nvr}] getTaskInfo failed: {exc}")
                 time.sleep(_adaptive_poll_interval(time.time() - start, interval))
                 continue
 
-            output = result.stdout
-            # Parse current state
-            state = "unknown"
-            for line in output.split("\n"):
-                if line.startswith("State:"):
-                    state = line.split(":", 1)[1].strip().lower()
-                    break
+            state = self._state_name(info.get("state") if info else None)
 
-            # Parse subtasks for more detail
-            subtasks = []
-            sub_result = self._run_koji("list-tasks", f"--parent={task_id}")
-            if sub_result.returncode == 0:
-                for line in sub_result.stdout.strip().split("\n"):
-                    if line and not line.startswith("ID"):
-                        parts = line.split()
-                        if len(parts) >= 5:
-                            sub_state = parts[3]
-                            sub_name = " ".join(parts[5:])
-                            subtasks.append(f"{sub_name} [{sub_state}]")
+            # Subtasks for detailed progress (best-effort).
+            subtasks: list[str] = []
+            try:
+                subs = session.listTasks(opts={"parent": task_id}) or []
+                for sub in subs[:3]:
+                    subtasks.append(
+                        f"{sub.get('method', '?')} [{self._state_name(sub.get('state'))}]"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
 
             elapsed = int(time.time() - start)
             minutes, seconds = divmod(elapsed, 60)
-
             if subtasks:
-                current = ", ".join(subtasks[:3])
-                progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {current}"
+                progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {', '.join(subtasks)}"
             else:
                 progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {state}"
-
             if progress != last_state:
                 logger.info(progress)
                 last_state = progress
 
-            if state in ("closed", "complete"):
+            if state == "closed":
                 return BuildStatus.COMPLETE
-            elif state == "failed":
+            if state == "failed":
                 logger.error(f"  [{nvr}] Build FAILED (task {task_id})")
                 return BuildStatus.FAILED
-            elif state == "canceled":
+            if state == "canceled":
                 return BuildStatus.CANCELED
 
             time.sleep(_adaptive_poll_interval(elapsed, interval))
@@ -372,33 +404,23 @@ class KojiBuilder:
         return BuildStatus.FAILED
 
     def _poll_builds(self, tasks: list, timeout: int = 7200, interval: int = 30) -> None:
-        """Poll multiple build tasks simultaneously until all complete or timeout.
-
-        Args:
-            tasks: List of BuildTask objects with task_id set
-            timeout: Maximum time to wait in seconds
-            interval: Seconds between polling sweeps
-        """
+        """Parallel polling of several tasks through one ClientSession."""
         pending = {t.task_id: t for t in tasks if t.task_id}
         if not pending:
             return
 
+        session = self._get_session()
         start = time.time()
 
         while pending and time.time() - start < timeout:
             completed_ids = []
             for task_id, task in pending.items():
-                result = self._run_koji("taskinfo", str(task_id), timeout=120)
-                if result.returncode != 0:
+                try:
+                    info = session.getTaskInfo(task_id)
+                except Exception:  # noqa: BLE001
                     continue
-
-                state = "unknown"
-                for line in result.stdout.split("\n"):
-                    if line.startswith("State:"):
-                        state = line.split(":", 1)[1].strip().lower()
-                        break
-
-                if state in ("closed", "complete"):
+                state = self._state_name(info.get("state") if info else None)
+                if state == "closed":
                     task.status = BuildStatus.COMPLETE
                     completed_ids.append(task_id)
                 elif state == "failed":
@@ -419,57 +441,63 @@ class KojiBuilder:
                 logger.info(f"  [{minutes}m{seconds:02d}s] Waiting for: {names}")
                 time.sleep(_adaptive_poll_interval(elapsed_s, interval))
 
-        # Timeout remaining tasks
         for task in pending.values():
             task.status = BuildStatus.FAILED
             task.error_message = f"Build timed out after {timeout}s"
             logger.error(f"  [{task.package_name}] Build timed out after {timeout}s")
 
     def _ensure_repo_ready(self) -> None:
-        """Ensure a repo exists for the build tag, creating one if needed."""
-        result = self._run_koji("list-tasks", timeout=120)
-        has_newrepo = result.returncode == 0 and "newRepo" in result.stdout
-
-        if not has_newrepo:
-            regen = self._run_koji("call", "newRepo", self.build_tag, timeout=120)
-            if regen.returncode == 0:
-                logger.info(f"Triggered newRepo for {self.build_tag}")
-
+        """Trigger newRepo on the build tag and wait for the task to finish."""
+        session = self._get_session()
+        try:
+            task_id = session.newRepo(self.build_tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"newRepo {self.build_tag} failed to start: {exc}")
+            return
+        logger.info(f"Triggered newRepo for {self.build_tag} (task {task_id})")
         logger.info(f"Waiting for repo to be ready: {self.build_tag}")
-        wait_result = self._run_koji("wait-repo", self.build_tag, "--timeout=1800", timeout=1860)
-        if wait_result.returncode == 0:
+        state = self._await_task(task_id, timeout=1800)
+        if state == "closed":
             logger.info("Repo is ready")
         else:
-            logger.warning("wait-repo returned non-zero, proceeding anyway")
+            logger.warning(f"newRepo ended in state {state}, proceeding anyway")
 
     def wait_for_repo(self, tag: Optional[str] = None, timeout: int = 1800) -> bool:
-        """
-        Wait for repository to be regenerated after build.
-
-        Args:
-            tag: Build tag to wait for (defaults to self.build_tag)
-            timeout: Maximum time to wait in seconds
-
-        Returns:
-            True if repo was regenerated successfully
-        """
+        """Trigger newRepo and wait. Returns True on `closed`."""
         tag = tag or self.build_tag
-
         logger.info(f"Waiting for repo regeneration: {tag}")
-
-        # Trigger newRepo explicitly — some Koji setups don't auto-create it
-        regen_result = self._run_koji("call", "newRepo", tag, timeout=120)
-        if regen_result.returncode == 0:
-            logger.info(f"Triggered newRepo for {tag}")
-
-        result = self._run_koji("wait-repo", tag, f"--timeout={timeout}", timeout=timeout + 60)
-
-        if result.returncode != 0:
-            logger.warning(f"wait-repo failed: {result.stderr}")
+        session = self._get_session()
+        try:
+            task_id = session.newRepo(tag)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"newRepo failed: {exc}")
             return False
+        logger.info(f"Triggered newRepo for {tag} (task {task_id})")
+        state = self._await_task(task_id, timeout=timeout)
+        if state == "closed":
+            logger.info("Repo regenerated successfully")
+            return True
+        logger.warning(f"wait-repo ended in state {state}")
+        return False
 
-        logger.info("Repo regenerated successfully")
-        return True
+    def _await_task(self, task_id: int, timeout: int = 1800) -> str:
+        """Poll a task until a terminal state through the current session.
+
+        Returns the state name (closed/failed/canceled) or `timeout`.
+        """
+        session = self._get_session()
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                info = session.getTaskInfo(task_id)
+            except Exception:  # noqa: BLE001
+                time.sleep(_adaptive_poll_interval(time.time() - start))
+                continue
+            state = self._state_name(info.get("state") if info else None)
+            if state in ("closed", "failed", "canceled"):
+                return state
+            time.sleep(_adaptive_poll_interval(time.time() - start))
+        return "timeout"
 
     def build_with_deps(self, srpm_path: str) -> BuildResult:
         """
@@ -497,6 +525,21 @@ class KojiBuilder:
 
         logger.info(f"Starting vibebuild for: {srpm_path}")
 
+        # Open one session for the whole build_with_deps: all koji RPCs go
+        # through it to avoid AuthLockError from per-user serialization.
+        own_session = self._session is None
+        if own_session:
+            self._open_session()
+        try:
+            return self._build_with_deps_impl(srpm_path, result, start_time)
+        finally:
+            if own_session:
+                self._close_session()
+
+    def _build_with_deps_impl(
+        self, srpm_path: Path, result: BuildResult, start_time: float
+    ) -> BuildResult:
+        """Body of build_with_deps without session management: we are already logged in on it."""
         # Ensure repo is ready before dependency resolution and builds
         self._ensure_repo_ready()
 
@@ -672,26 +715,30 @@ class KojiBuilder:
         return result
 
     def get_build_status(self, task_id: int) -> BuildStatus:
-        """Get current status of a build task."""
-        result = self._run_koji("taskinfo", str(task_id))
-
-        if result.returncode != 0:
+        """Current state of a task through the persistent ClientSession."""
+        session = self._get_session()
+        try:
+            info = session.getTaskInfo(task_id)
+        except Exception:  # noqa: BLE001
             return BuildStatus.FAILED
-
-        output = result.stdout.lower()
-
-        if "closed" in output or "complete" in output:
+        if not info:
+            return BuildStatus.FAILED
+        state = self._state_name(info.get("state"))
+        if state == "closed":
             return BuildStatus.COMPLETE
-        elif "failed" in output:
+        if state == "failed":
             return BuildStatus.FAILED
-        elif "canceled" in output:
+        if state == "canceled":
             return BuildStatus.CANCELED
-        elif "open" in output or "free" in output or "assigned" in output:
+        if state in ("open", "free", "assigned"):
             return BuildStatus.BUILDING
-
         return BuildStatus.PENDING
 
     def cancel_build(self, task_id: int) -> bool:
-        """Cancel a running build task."""
-        result = self._run_koji("cancel", str(task_id))
-        return result.returncode == 0
+        """Cancel a task through the persistent ClientSession."""
+        session = self._get_session()
+        try:
+            session.cancelTask(task_id)
+        except Exception:  # noqa: BLE001
+            return False
+        return True

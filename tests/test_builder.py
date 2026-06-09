@@ -1,8 +1,8 @@
 """Tests for vibebuild.builder module."""
 
-import subprocess
 from unittest.mock import MagicMock, Mock, patch
 
+import koji
 import pytest
 
 from vibebuild.analyzer import PackageInfo
@@ -104,45 +104,14 @@ class TestKojiBuilder:
         assert builder.scratch is True
         assert builder.nowait is True
 
-    def test_run_koji_command(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "output"
-        builder = KojiBuilder()
-
-        result = builder._run_koji("list-tags")
-
-        assert result.returncode == 0
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "koji" in call_args
-        assert "--server=https://koji.fedoraproject.org/kojihub" in call_args
-        assert "list-tags" in call_args
-
-    def test_run_koji_with_cert(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        builder = KojiBuilder(cert="/path/to/cert.pem", serverca="/path/to/ca.crt")
-
-        builder._run_koji("list-tags")
-
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "--cert=/path/to/cert.pem" in call_args
-        # --serverca is not passed on CLI (RHEL9 compat); read from ~/.koji/config
-        assert not any("--serverca" in a for a in call_args)
-
-    def test_run_koji_timeout(self, mock_subprocess_run):
-        mock_subprocess_run.side_effect = subprocess.TimeoutExpired(cmd="koji", timeout=60)
-        builder = KojiBuilder()
-
-        with pytest.raises(KojiConnectionError, match="timed out"):
-            builder._run_koji("list-tags")
-
-    def test_build_package_success(self, tmp_path, mock_subprocess_run, sample_spec_content):
+    def test_build_package_success(
+        self, tmp_path, mock_koji_session, sample_spec_content
+    ):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
         spec_file = tmp_path / "test-package.spec"
         spec_file.write_text(sample_spec_content)
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345\nTask info: id=12345"
-        mock_subprocess_run.return_value.stderr = ""
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -155,12 +124,12 @@ class TestKojiBuilder:
         assert task.task_id == 12345
         assert task.status == BuildStatus.BUILDING
 
-    def test_build_package_with_wait(self, tmp_path, mock_subprocess_run, sample_spec_content):
+    def test_build_package_with_wait(
+        self, tmp_path, mock_koji_session, sample_spec_content
+    ):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345\nBuild complete"
-        mock_subprocess_run.return_value.stderr = ""
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -172,11 +141,12 @@ class TestKojiBuilder:
 
         assert task.status == BuildStatus.COMPLETE
 
-    def test_build_package_scratch(self, tmp_path, mock_subprocess_run, sample_spec_content):
+    def test_build_package_scratch(
+        self, tmp_path, mock_koji_session, sample_spec_content
+    ):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345"
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder(scratch=True)
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -185,8 +155,9 @@ class TestKojiBuilder:
             )
             builder.build_package(str(srpm), wait=False)
 
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "--scratch" in call_args
+        # session.build(srpm_path_on_hub, target, opts): the third argument contains scratch.
+        build_call = mock_koji_session.build.call_args
+        assert build_call.args[2] == {"scratch": True}
 
     def test_build_package_file_not_found(self):
         builder = KojiBuilder()
@@ -194,121 +165,91 @@ class TestKojiBuilder:
         with pytest.raises(FileNotFoundError):
             builder.build_package("/nonexistent/path.src.rpm")
 
-    def test_build_package_failure(self, tmp_path, mock_subprocess_run):
+    def test_build_package_failure(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stderr = "Build failed: dependency error"
+        mock_koji_session.build.side_effect = koji.GenericError("dependency error")
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
             mock_info.return_value = PackageInfo(
                 name="test", version="1.0", release="1", build_requires=[], source_urls=[]
             )
-            with pytest.raises(KojiBuildError, match="Build failed"):
+            with pytest.raises(KojiBuildError, match="session.build failed"):
                 builder.build_package(str(srpm))
 
-    def test_wait_for_repo_success(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Repo ready"
+    def test_wait_for_repo_success(self, mock_koji_session):
+        mock_koji_session.newRepo.return_value = 555
+        mock_koji_session.getTaskInfo.return_value = {"state": 2}  # closed
         builder = KojiBuilder()
 
-        result = builder.wait_for_repo()
+        with patch("vibebuild.builder.time.sleep"):
+            result = builder.wait_for_repo()
 
         assert result is True
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "wait-repo" in call_args
-        assert "fedora-build" in call_args
+        mock_koji_session.newRepo.assert_called_once_with("fedora-build")
 
-    def test_wait_for_repo_custom_tag(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
+    def test_wait_for_repo_custom_tag(self, mock_koji_session):
+        mock_koji_session.newRepo.return_value = 555
+        mock_koji_session.getTaskInfo.return_value = {"state": 2}
         builder = KojiBuilder()
 
-        builder.wait_for_repo(tag="custom-tag")
+        with patch("vibebuild.builder.time.sleep"):
+            builder.wait_for_repo(tag="custom-tag")
 
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "custom-tag" in call_args
+        mock_koji_session.newRepo.assert_called_once_with("custom-tag")
 
-    def test_wait_for_repo_failure(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stderr = "Timeout waiting for repo"
+    def test_wait_for_repo_failure(self, mock_koji_session):
+        mock_koji_session.newRepo.return_value = 555
+        mock_koji_session.getTaskInfo.return_value = {"state": 5}  # failed
         builder = KojiBuilder()
 
-        result = builder.wait_for_repo()
+        with patch("vibebuild.builder.time.sleep"):
+            result = builder.wait_for_repo()
 
         assert result is False
 
-    def test_get_build_status_complete(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task: 12345\nState: closed"
+    def test_get_build_status_complete(self, mock_koji_session):
+        mock_koji_session.getTaskInfo.return_value = {"state": 2}
         builder = KojiBuilder()
+        assert builder.get_build_status(12345) == BuildStatus.COMPLETE
 
-        result = builder.get_build_status(12345)
-
-        assert result == BuildStatus.COMPLETE
-
-    def test_get_build_status_failed(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task: 12345\nState: failed"
+    def test_get_build_status_failed(self, mock_koji_session):
+        mock_koji_session.getTaskInfo.return_value = {"state": 5}
         builder = KojiBuilder()
+        assert builder.get_build_status(12345) == BuildStatus.FAILED
 
-        result = builder.get_build_status(12345)
-
-        assert result == BuildStatus.FAILED
-
-    def test_get_build_status_building(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task: 12345\nState: open"
+    def test_get_build_status_building(self, mock_koji_session):
+        mock_koji_session.getTaskInfo.return_value = {"state": 1}
         builder = KojiBuilder()
+        assert builder.get_build_status(12345) == BuildStatus.BUILDING
 
-        result = builder.get_build_status(12345)
-
-        assert result == BuildStatus.BUILDING
-
-    def test_get_build_status_canceled(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task: 12345\nState: canceled"
+    def test_get_build_status_canceled(self, mock_koji_session):
+        mock_koji_session.getTaskInfo.return_value = {"state": 3}
         builder = KojiBuilder()
+        assert builder.get_build_status(12345) == BuildStatus.CANCELED
 
-        result = builder.get_build_status(12345)
-
-        assert result == BuildStatus.CANCELED
-
-    def test_get_build_status_error(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
+    def test_get_build_status_error(self, mock_koji_session):
+        mock_koji_session.getTaskInfo.side_effect = koji.GenericError("rpc failed")
         builder = KojiBuilder()
+        assert builder.get_build_status(12345) == BuildStatus.FAILED
 
-        result = builder.get_build_status(12345)
-
-        assert result == BuildStatus.FAILED
-
-    def test_cancel_build_success(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
+    def test_cancel_build_success(self, mock_koji_session):
         builder = KojiBuilder()
+        assert builder.cancel_build(12345) is True
+        mock_koji_session.cancelTask.assert_called_once_with(12345)
 
-        result = builder.cancel_build(12345)
-
-        assert result is True
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "cancel" in call_args
-        assert "12345" in call_args
-
-    def test_cancel_build_failure(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
+    def test_cancel_build_failure(self, mock_koji_session):
+        mock_koji_session.cancelTask.side_effect = koji.GenericError("permission denied")
         builder = KojiBuilder()
-
-        result = builder.cancel_build(12345)
-
-        assert result is False
+        assert builder.cancel_build(12345) is False
 
 
 class TestSubmitBuild:
-    def test_submit_build_returns_building_status(self, tmp_path, mock_subprocess_run):
+    def test_submit_build_returns_building_status(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345"
-        mock_subprocess_run.return_value.stderr = ""
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -321,12 +262,51 @@ class TestSubmitBuild:
         assert task.task_id == 12345
         assert task.package_name == "test-pkg"
 
-    def test_submit_build_parses_task_info_format(self, tmp_path, mock_subprocess_run):
+    def test_submit_build_uses_single_koji_session(self, tmp_path, mock_koji_session):
+        # Regression for AuthLockError: add-pkg + uploadWrapper + build go through
+        # the same ClientSession instance. The session lifecycle (logout) is
+        # the responsibility of build_with_deps / build_package, so here we do not
+        # check logout.
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task info: id=67890"
-        mock_subprocess_run.return_value.stderr = ""
+        mock_koji_session.build.return_value = 99
+        builder = KojiBuilder(cert="/p/c.pem", serverca="/p/ca.crt")
+
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            builder._submit_build(str(srpm))
+
+        mock_koji_session.packageListAdd.assert_called_once()
+        mock_koji_session.uploadWrapper.assert_called_once()
+        mock_koji_session.build.assert_called_once()
+
+    def test_build_package_closes_session_after_call(self, tmp_path, mock_koji_session):
+        # build_package owns the session and must log out in finally.
+        srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
+        srpm.write_text("fake srpm")
+        mock_koji_session.build.return_value = 99
+        builder = KojiBuilder()
+
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            builder.build_package(str(srpm), wait=False)
+
+        mock_koji_session.ssl_login.assert_called_once()
+        mock_koji_session.logout.assert_called_once()
+
+    def test_submit_build_ignores_packageListAdd_already_exists(
+        self, tmp_path, mock_koji_session
+    ):
+        srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
+        srpm.write_text("fake srpm")
+        mock_koji_session.packageListAdd.side_effect = koji.GenericError(
+            "package python-flask already exists in tag f42"
+        )
+        mock_koji_session.build.return_value = 42
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -335,8 +315,7 @@ class TestSubmitBuild:
             )
             task = builder._submit_build(str(srpm))
 
-        assert task.task_id == 67890
-        assert task.status == BuildStatus.BUILDING
+        assert task.task_id == 42
 
     def test_submit_build_file_not_found(self):
         builder = KojiBuilder()
@@ -344,11 +323,10 @@ class TestSubmitBuild:
         with pytest.raises(FileNotFoundError):
             builder._submit_build("/nonexistent/path.src.rpm")
 
-    def test_submit_build_failure_raises(self, tmp_path, mock_subprocess_run):
+    def test_submit_build_failure_raises(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stderr = "Build submission failed"
+        mock_koji_session.build.side_effect = koji.GenericError("Build submission failed")
         builder = KojiBuilder()
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -360,26 +338,19 @@ class TestSubmitBuild:
 
 
 class TestPollBuilds:
-    def test_poll_builds_all_complete(self, mock_subprocess_run):
+    # koji task state codes: 2=closed, 3=canceled, 5=failed, 1=open.
+    _CLOSED = {"state": 2}
+    _FAILED = {"state": 5}
+    _CANCELED = {"state": 3}
+    _OPEN = {"state": 1}
+
+    def test_poll_builds_all_complete(self, mock_koji_session):
         builder = KojiBuilder()
         tasks = [
-            BuildTask(
-                package_name="pkg1",
-                srpm_path="/p1",
-                target="t",
-                task_id=101,
-                status=BuildStatus.BUILDING,
-            ),
-            BuildTask(
-                package_name="pkg2",
-                srpm_path="/p2",
-                target="t",
-                task_id=102,
-                status=BuildStatus.BUILDING,
-            ),
+            BuildTask("pkg1", "/p1", "t", task_id=101, status=BuildStatus.BUILDING),
+            BuildTask("pkg2", "/p2", "t", task_id=102, status=BuildStatus.BUILDING),
         ]
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "State: closed"
+        mock_koji_session.getTaskInfo.return_value = self._CLOSED
 
         with patch("vibebuild.builder.time.sleep"):
             builder._poll_builds(tasks, timeout=60, interval=1)
@@ -387,36 +358,17 @@ class TestPollBuilds:
         assert tasks[0].status == BuildStatus.COMPLETE
         assert tasks[1].status == BuildStatus.COMPLETE
 
-    def test_poll_builds_mixed_results(self, mock_subprocess_run):
+    def test_poll_builds_mixed_results(self, mock_koji_session):
         builder = KojiBuilder()
         tasks = [
-            BuildTask(
-                package_name="pkg1",
-                srpm_path="/p1",
-                target="t",
-                task_id=201,
-                status=BuildStatus.BUILDING,
-            ),
-            BuildTask(
-                package_name="pkg2",
-                srpm_path="/p2",
-                target="t",
-                task_id=202,
-                status=BuildStatus.BUILDING,
-            ),
+            BuildTask("pkg1", "/p1", "t", task_id=201, status=BuildStatus.BUILDING),
+            BuildTask("pkg2", "/p2", "t", task_id=202, status=BuildStatus.BUILDING),
         ]
-        mock_subprocess_run.return_value.returncode = 0
 
-        # pkg1 closed, pkg2 failed
-        def taskinfo_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if "201" in cmd:
-                return Mock(returncode=0, stdout="State: closed", stderr="")
-            elif "202" in cmd:
-                return Mock(returncode=0, stdout="State: failed", stderr="")
-            return Mock(returncode=0, stdout="", stderr="")
+        def info(task_id):
+            return self._CLOSED if task_id == 201 else self._FAILED
 
-        mock_subprocess_run.side_effect = taskinfo_side_effect
+        mock_koji_session.getTaskInfo.side_effect = info
 
         with patch("vibebuild.builder.time.sleep"):
             builder._poll_builds(tasks, timeout=60, interval=1)
@@ -424,29 +376,17 @@ class TestPollBuilds:
         assert tasks[0].status == BuildStatus.COMPLETE
         assert tasks[1].status == BuildStatus.FAILED
 
-    def test_poll_builds_timeout(self, mock_subprocess_run):
+    def test_poll_builds_timeout(self, mock_koji_session):
         builder = KojiBuilder()
-        tasks = [
-            BuildTask(
-                package_name="pkg1",
-                srpm_path="/p1",
-                target="t",
-                task_id=301,
-                status=BuildStatus.BUILDING,
-            ),
-        ]
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "State: open"
+        tasks = [BuildTask("pkg1", "/p1", "t", task_id=301, status=BuildStatus.BUILDING)]
+        mock_koji_session.getTaskInfo.return_value = self._OPEN
 
         call_count = 0
 
         def fake_time():
             nonlocal call_count
             call_count += 1
-            # First few calls return 0 (start), then exceed timeout
-            if call_count <= 3:
-                return 0
-            return 9999
+            return 0 if call_count <= 3 else 9999
 
         with patch("vibebuild.builder.time.time", side_effect=fake_time):
             with patch("vibebuild.builder.time.sleep"):
@@ -455,36 +395,18 @@ class TestPollBuilds:
         assert tasks[0].status == BuildStatus.FAILED
         assert "timed out" in tasks[0].error_message
 
-    def test_poll_builds_no_task_id_skipped(self, mock_subprocess_run):
+    def test_poll_builds_no_task_id_skipped(self, mock_koji_session):
         builder = KojiBuilder()
-        tasks = [
-            BuildTask(
-                package_name="pkg1",
-                srpm_path="/p1",
-                target="t",
-                task_id=None,
-                status=BuildStatus.BUILDING,
-            ),
-        ]
+        tasks = [BuildTask("pkg1", "/p1", "t", task_id=None, status=BuildStatus.BUILDING)]
 
         builder._poll_builds(tasks)
 
-        # Status unchanged — no task_id to poll
         assert tasks[0].status == BuildStatus.BUILDING
 
-    def test_poll_builds_canceled(self, mock_subprocess_run):
+    def test_poll_builds_canceled(self, mock_koji_session):
         builder = KojiBuilder()
-        tasks = [
-            BuildTask(
-                package_name="pkg1",
-                srpm_path="/p1",
-                target="t",
-                task_id=401,
-                status=BuildStatus.BUILDING,
-            ),
-        ]
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "State: canceled"
+        tasks = [BuildTask("pkg1", "/p1", "t", task_id=401, status=BuildStatus.BUILDING)]
+        mock_koji_session.getTaskInfo.return_value = self._CANCELED
 
         with patch("vibebuild.builder.time.sleep"):
             builder._poll_builds(tasks, timeout=60, interval=1)
@@ -636,14 +558,12 @@ class TestKojiBuilderBuildChain:
         assert "pkg1" in result.built_packages
         assert "pkg2" in result.built_packages
 
-    def test_build_chain_stops_on_failure(self, tmp_path, mock_subprocess_run):
+    def test_build_chain_stops_on_failure(self, tmp_path, mock_koji_session):
         pkg1 = tmp_path / "pkg1.src.rpm"
         pkg1.write_text("fake")
         pkg2 = tmp_path / "pkg2.src.rpm"
         pkg2.write_text("fake")
-        mock_subprocess_run.side_effect = [
-            Mock(returncode=1, stderr="Build failed"),
-        ]
+        mock_koji_session.build.side_effect = koji.GenericError("Build failed")
         builder = KojiBuilder()
         packages = [("pkg1", str(pkg1)), ("pkg2", str(pkg2))]
 
@@ -723,42 +643,6 @@ class TestKojiBuilderGetEnv:
         env = builder._get_env()
 
         assert env is None
-
-
-class TestBuildPackageEdgeCases:
-    def test_build_package_task_id_parse_created_task_nan(self, tmp_path, mock_subprocess_run):
-        """ValueError when parsing task_id from 'Created task: NaN'."""
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: NaN\n"
-        mock_subprocess_run.return_value.stderr = ""
-        builder = KojiBuilder()
-
-        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
-            mock_info.return_value = PackageInfo(
-                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
-            )
-            task = builder.build_package(str(srpm), wait=True)
-
-        assert task.task_id is None
-
-    def test_build_package_task_id_parse_task_info_nan(self, tmp_path, mock_subprocess_run):
-        """ValueError when parsing task_id from 'Task info: id=NaN'."""
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task info: id=NaN\n"
-        mock_subprocess_run.return_value.stderr = ""
-        builder = KojiBuilder()
-
-        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
-            mock_info.return_value = PackageInfo(
-                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
-            )
-            task = builder.build_package(str(srpm), wait=True)
-
-        assert task.task_id is None
 
 
 class TestBuildWithDepsEdgeCases:
@@ -1028,10 +912,9 @@ class TestBuildChainEdgeCases:
 
 
 class TestGetBuildStatusEdgeCases:
-    def test_get_build_status_pending_fallthrough(self, mock_subprocess_run):
-        """get_build_status should return PENDING for unrecognized state."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Task: 12345\nState: waiting"
+    def test_get_build_status_pending_fallthrough(self, mock_koji_session):
+        """An unknown koji state maps to PENDING."""
+        mock_koji_session.getTaskInfo.return_value = {"state": 42}  # not in map
         builder = KojiBuilder()
 
         result = builder.get_build_status(12345)
@@ -1040,13 +923,11 @@ class TestGetBuildStatusEdgeCases:
 
 
 class TestBuildPackageAddPkg:
-    def test_add_pkg_called_before_build(self, tmp_path, mock_subprocess_run):
-        """build_package should call add-pkg before submitting the build."""
+    def test_packageListAdd_called_before_build(self, tmp_path, mock_koji_session):
+        """build_package must call packageListAdd before session.build."""
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345"
-        mock_subprocess_run.return_value.stderr = ""
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder(target="f42")
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -1055,24 +936,20 @@ class TestBuildPackageAddPkg:
             )
             builder.build_package(str(srpm), wait=False)
 
-        # Check that add-pkg was called (first subprocess call)
-        calls = mock_subprocess_run.call_args_list
-        add_pkg_call = calls[0][0][0]
-        assert "add-pkg" in add_pkg_call
-        assert "f42" in add_pkg_call
-        assert "test-pkg" in add_pkg_call
-        assert "--owner=kojiadmin" in add_pkg_call
+        mock_koji_session.packageListAdd.assert_called_once_with(
+            "f42", "test-pkg", owner="kojiadmin"
+        )
+        method_names = [name for name, _, _ in mock_koji_session.method_calls]
+        assert method_names.index("packageListAdd") < method_names.index("build")
 
-    def test_add_pkg_failure_logs_warning(self, tmp_path, mock_subprocess_run):
-        """build_package should warn but continue if add-pkg fails."""
+    def test_packageListAdd_already_exists_ignored(self, tmp_path, mock_koji_session):
+        """`already exists` from packageListAdd must be silently ignored."""
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-
-        # First call (add-pkg) fails, second call (build) succeeds
-        mock_subprocess_run.side_effect = [
-            Mock(returncode=1, stderr="GenericError: some error", stdout=""),
-            Mock(returncode=0, stderr="", stdout="Created task: 12345"),
-        ]
+        mock_koji_session.packageListAdd.side_effect = koji.GenericError(
+            "package already exists in tag"
+        )
+        mock_koji_session.build.return_value = 12345
         builder = KojiBuilder(target="f42")
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
@@ -1083,24 +960,19 @@ class TestBuildPackageAddPkg:
 
         assert task.status == BuildStatus.BUILDING
 
-    def test_add_pkg_already_exists_ignored(self, tmp_path, mock_subprocess_run):
-        """build_package should silently ignore 'already exists' from add-pkg."""
+    def test_packageListAdd_other_error_raises(self, tmp_path, mock_koji_session):
+        """Any other packageListAdd error is fatal, wrapped in KojiBuildError."""
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
-
-        mock_subprocess_run.side_effect = [
-            Mock(returncode=1, stderr="package already exists in tag", stdout=""),
-            Mock(returncode=0, stderr="", stdout="Created task: 12345"),
-        ]
+        mock_koji_session.packageListAdd.side_effect = koji.GenericError("permission denied")
         builder = KojiBuilder(target="f42")
 
         with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
             mock_info.return_value = PackageInfo(
                 name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
             )
-            task = builder.build_package(str(srpm), wait=False)
-
-        assert task.status == BuildStatus.BUILDING
+            with pytest.raises(KojiBuildError, match="packageListAdd"):
+                builder.build_package(str(srpm), wait=False)
 
 
 class TestBuildWithDepsEnsureRepoReady:
