@@ -357,6 +357,17 @@ class DependencyResolver:
                 resolved_name = self.name_resolver.resolve(name)
 
             if resolved_name in self.available_packages:
+                # Whitelisted in our koji but no build yet -> vibebuild must build it.
+                # Without this check a whitelisted package with no build counts as available
+                # and is quietly taken from external_repo, bypassing the local build and tagging.
+                if self.koji.latest_build(resolved_name, self.koji_tag) is None:
+                    logger.info(
+                        "  %s: whitelisted in %s but no build exists, will be built",
+                        resolved_name,
+                        self.koji_tag,
+                    )
+                    missing.append(resolved_name)
+                    continue
                 if self._version_ok(resolved_name, required_op, required_ver):
                     continue
                 logger.info(

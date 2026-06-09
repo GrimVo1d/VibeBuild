@@ -216,6 +216,25 @@ class TestDependencyResolver:
         assert "missing-pkg" in result
         assert "python3" not in result
 
+    def test_find_missing_deps_whitelisted_but_no_build(self, mock_koji_client):
+        """Package in whitelist (list_packages) but without a build in our tag -> missing.
+
+        Without this check vibebuild would consider such a package available (based
+        on the whitelist) and skip it, which led to a silent pull from
+        external_repo and an empty tagged_deps in the build summary.
+        """
+        mock_koji_client.list_packages.return_value = ["python-trustme", "gcc"]
+        mock_koji_client.package_exists.return_value = True
+        mock_koji_client.latest_build.side_effect = lambda pkg, tag: (
+            None if pkg == "python-trustme" else {"nvr": f"{pkg}-1.0-1.fc42"}
+        )
+        resolver = DependencyResolver(koji_client=mock_koji_client)
+
+        result = resolver.find_missing_deps(["python-trustme", "gcc"])
+
+        assert "python-trustme" in result
+        assert "gcc" not in result
+
     def test_find_missing_deps_with_build_requirement_objects(self, mock_koji_client):
         mock_koji_client.list_packages.return_value = ["gcc"]
         mock_koji_client.package_exists.side_effect = lambda p, t: p == "gcc"
@@ -794,23 +813,29 @@ class TestVersionConstraints:
         else:
             assert "python3-cffi" not in result
 
-    def test_no_constraint_passes_without_check(self, mock_koji_client):
-        """Without operator/version, latest_build must not be called."""
+    def test_no_constraint_with_existing_build_skips(self, mock_koji_client):
+        """Without operator/version: whitelisted + build exists -> available, not missing."""
         mock_koji_client.list_packages.return_value = ["gcc"]
         mock_koji_client.package_exists.return_value = True
+        mock_koji_client.latest_build.return_value = {"nvr": "gcc-13.0-1.fc42"}
         resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
 
         result = resolver.find_missing_deps([BuildRequirement(name="gcc")])
 
         assert result == []
-        mock_koji_client.latest_build.assert_not_called()
+        mock_koji_client.latest_build.assert_called_once_with("gcc", "f42-build")
 
-    def test_latest_build_none_is_optimistic(self, mock_koji_client):
-        """If latest_build returned None, the version check is considered passed."""
+    def test_latest_build_none_forces_local_build(self, mock_koji_client):
+        """Whitelisted + latest_build=None -> must be marked as missing.
+
+        Contract: a package in the whitelist without a build is ours, waiting to be built, not
+        available externally. The version constraint does not matter here,
+        the absence of a build takes precedence.
+        """
         mock_koji_client.list_packages.return_value = ["python3-cffi"]
         mock_koji_client.package_exists.return_value = True
         mock_koji_client.latest_build.return_value = None
         resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f42-build")
         dep = BuildRequirement(name="python3-cffi", version="1.12", operator=">=")
 
-        assert "python3-cffi" not in resolver.find_missing_deps([dep])
+        assert "python3-cffi" in resolver.find_missing_deps([dep])
