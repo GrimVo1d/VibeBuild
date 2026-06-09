@@ -284,9 +284,7 @@ class KojiBuilder:
 
         return task
 
-    def _submit_via_session(
-        self, srpm_path: Path, package_name: str, dest_tag: str
-    ) -> int:
+    def _submit_via_session(self, srpm_path: Path, package_name: str, dest_tag: str) -> int:
         """Through the persistent session do add-pkg + uploadWrapper + build atomically.
 
         Takes the current `self._session` (opens a new one if there is none). Does

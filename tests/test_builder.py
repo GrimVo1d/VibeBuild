@@ -1,6 +1,6 @@
 """Tests for vibebuild.builder module."""
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import koji
 import pytest
@@ -12,7 +12,7 @@ from vibebuild.builder import (
     BuildTask,
     KojiBuilder,
 )
-from vibebuild.exceptions import KojiBuildError, KojiConnectionError
+from vibebuild.exceptions import KojiBuildError
 
 
 class TestBuildStatus:
@@ -104,9 +104,7 @@ class TestKojiBuilder:
         assert builder.scratch is True
         assert builder.nowait is True
 
-    def test_build_package_success(
-        self, tmp_path, mock_koji_session, sample_spec_content
-    ):
+    def test_build_package_success(self, tmp_path, mock_koji_session, sample_spec_content):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
         spec_file = tmp_path / "test-package.spec"
@@ -124,9 +122,7 @@ class TestKojiBuilder:
         assert task.task_id == 12345
         assert task.status == BuildStatus.BUILDING
 
-    def test_build_package_with_wait(
-        self, tmp_path, mock_koji_session, sample_spec_content
-    ):
+    def test_build_package_with_wait(self, tmp_path, mock_koji_session, sample_spec_content):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
         mock_koji_session.build.return_value = 12345
@@ -141,9 +137,7 @@ class TestKojiBuilder:
 
         assert task.status == BuildStatus.COMPLETE
 
-    def test_build_package_scratch(
-        self, tmp_path, mock_koji_session, sample_spec_content
-    ):
+    def test_build_package_scratch(self, tmp_path, mock_koji_session, sample_spec_content):
         srpm = tmp_path / "test-package-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
         mock_koji_session.build.return_value = 12345
@@ -298,9 +292,7 @@ class TestSubmitBuild:
         mock_koji_session.ssl_login.assert_called_once()
         mock_koji_session.logout.assert_called_once()
 
-    def test_submit_build_ignores_packageListAdd_already_exists(
-        self, tmp_path, mock_koji_session
-    ):
+    def test_submit_build_ignores_packageListAdd_already_exists(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
         srpm.write_text("fake srpm")
         mock_koji_session.packageListAdd.side_effect = koji.GenericError(

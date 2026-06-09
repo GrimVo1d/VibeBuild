@@ -2,7 +2,7 @@
 - name: Deploy Koji Build System
   hosts: koji
   become: yes
-  
+
   pre_tasks:
     - name: Update system packages
       dnf:
