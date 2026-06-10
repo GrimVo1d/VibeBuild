@@ -996,3 +996,147 @@ class TestBuildWithDepsEnsureRepoReady:
 
             # Called once at the start of build_with_deps (no longer before final build)
             assert mock_ensure.call_count == 1
+
+
+class TestUnpackagedFilesRetry:
+    """Retry of a build with `_unpackaged_files_terminate_build 0` on the corresponding
+    rpmbuild error. Applying the macro is optional, only on retry.
+    """
+
+    def test_detect_unpackaged_marker_in_build_log(self, mock_koji_session):
+        mock_koji_session.listTasks.return_value = [{"id": 501}]
+        mock_koji_session.listTaskOutput.return_value = {
+            "build.log": {"st_size": "8000"},
+            "state.log": {"st_size": "200"},
+        }
+        marker = KojiBuilder._UNPACKAGED_FILES_MARKER.encode()
+        mock_koji_session.downloadTaskOutput.return_value = b"... noise ...\n" + marker + b"\n"
+        builder = KojiBuilder()
+
+        assert builder._task_has_unpackaged_files_error(500) is True
+        # the detector reads with a positive offset; for an 8000-byte log the offset must be 0
+        args, kwargs = mock_koji_session.downloadTaskOutput.call_args
+        assert kwargs.get("offset", args[2] if len(args) > 2 else None) == 0
+
+    def test_detect_uses_tail_offset_for_large_log(self, mock_koji_session):
+        mock_koji_session.listTasks.return_value = []
+        mock_koji_session.listTaskOutput.return_value = {
+            "build.log": {"st_size": str(5_000_000)},
+        }
+        marker = KojiBuilder._UNPACKAGED_FILES_MARKER.encode()
+        mock_koji_session.downloadTaskOutput.return_value = marker
+        builder = KojiBuilder()
+
+        assert builder._task_has_unpackaged_files_error(800) is True
+        args, kwargs = mock_koji_session.downloadTaskOutput.call_args
+        offset = kwargs.get("offset", args[2] if len(args) > 2 else None)
+        assert offset == 5_000_000 - KojiBuilder._UNPACKAGED_FILES_LOG_TAIL_BYTES
+
+    def test_detect_returns_false_when_marker_absent(self, mock_koji_session):
+        mock_koji_session.listTasks.return_value = [{"id": 601}]
+        mock_koji_session.listTaskOutput.return_value = {
+            "build.log": {"st_size": "500"},
+        }
+        mock_koji_session.downloadTaskOutput.return_value = b"unrelated build output\n"
+        builder = KojiBuilder()
+
+        assert builder._task_has_unpackaged_files_error(600) is False
+
+    def test_detect_returns_false_when_log_missing(self, mock_koji_session):
+        mock_koji_session.listTasks.return_value = [{"id": 701}]
+        mock_koji_session.listTaskOutput.return_value = {"state.log": {"st_size": "100"}}
+        builder = KojiBuilder()
+
+        assert builder._task_has_unpackaged_files_error(700) is False
+        mock_koji_session.downloadTaskOutput.assert_not_called()
+
+    def test_build_package_retries_with_macro_on_unpackaged_error(
+        self, tmp_path, mock_koji_session
+    ):
+        srpm = tmp_path / "pkg.src.rpm"
+        srpm.write_text("fake")
+        builder = KojiBuilder()
+
+        first = BuildTask(
+            "pkg", str(srpm), "fedora-target", task_id=11, status=BuildStatus.BUILDING
+        )
+        retry = BuildTask(
+            "pkg", str(srpm), "fedora-target", task_id=22, status=BuildStatus.BUILDING
+        )
+        submit_calls: list[bool] = []
+
+        def fake_submit(path, add_unpackaged_macro=False):
+            submit_calls.append(add_unpackaged_macro)
+            return first if len(submit_calls) == 1 else retry
+
+        poll_results = [BuildStatus.FAILED, BuildStatus.COMPLETE]
+
+        def fake_poll(task_id, label, *_, **__):
+            return poll_results.pop(0)
+
+        with patch.object(builder, "_submit_build", side_effect=fake_submit):
+            with patch.object(builder, "_poll_build", side_effect=fake_poll):
+                with patch.object(builder, "_task_has_unpackaged_files_error", return_value=True):
+                    task = builder.build_package(str(srpm), wait=True)
+
+        assert submit_calls == [False, True]
+        assert task.task_id == 22
+        assert task.status == BuildStatus.COMPLETE
+
+    def test_build_package_no_retry_when_marker_absent(self, tmp_path, mock_koji_session):
+        srpm = tmp_path / "pkg.src.rpm"
+        srpm.write_text("fake")
+        builder = KojiBuilder()
+
+        first = BuildTask(
+            "pkg", str(srpm), "fedora-target", task_id=11, status=BuildStatus.BUILDING
+        )
+
+        with patch.object(builder, "_submit_build", return_value=first) as mock_submit:
+            with patch.object(builder, "_poll_build", return_value=BuildStatus.FAILED):
+                with patch.object(builder, "_task_has_unpackaged_files_error", return_value=False):
+                    task = builder.build_package(str(srpm), wait=True)
+
+        assert mock_submit.call_count == 1
+        assert task.task_id == 11
+        assert task.status == BuildStatus.FAILED
+
+    def test_retry_unpackaged_failures_swaps_task_on_success(self, tmp_path, mock_koji_session):
+        srpm = tmp_path / "dep.src.rpm"
+        srpm.write_text("fake")
+        builder = KojiBuilder()
+        failed_task = BuildTask(
+            "dep", str(srpm), "fedora-target", task_id=42, status=BuildStatus.FAILED
+        )
+        retry_task = BuildTask(
+            "dep", str(srpm), "fedora-target", task_id=43, status=BuildStatus.BUILDING
+        )
+
+        def fake_poll(tasks, *_, **__):
+            for t in tasks:
+                t.status = BuildStatus.COMPLETE
+
+        with patch.object(builder, "_task_has_unpackaged_files_error", return_value=True):
+            with patch.object(builder, "_submit_build", return_value=retry_task) as mock_submit:
+                with patch.object(builder, "_poll_builds", side_effect=fake_poll):
+                    builder._retry_unpackaged_failures([failed_task])
+
+        mock_submit.assert_called_once_with(str(srpm), add_unpackaged_macro=True)
+        assert failed_task.task_id == 43
+        assert failed_task.status == BuildStatus.COMPLETE
+
+    def test_retry_unpackaged_failures_skips_when_marker_absent(self, tmp_path, mock_koji_session):
+        srpm = tmp_path / "dep.src.rpm"
+        srpm.write_text("fake")
+        builder = KojiBuilder()
+        failed_task = BuildTask(
+            "dep", str(srpm), "fedora-target", task_id=42, status=BuildStatus.FAILED
+        )
+
+        with patch.object(builder, "_task_has_unpackaged_files_error", return_value=False):
+            with patch.object(builder, "_submit_build") as mock_submit:
+                builder._retry_unpackaged_failures([failed_task])
+
+        mock_submit.assert_not_called()
+        assert failed_task.task_id == 42
+        assert failed_task.status == BuildStatus.FAILED

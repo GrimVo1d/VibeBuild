@@ -133,6 +133,8 @@ def mock_koji_session(mocker):
     session.newRepo.return_value = 999
     session.getTaskInfo.return_value = {"state": 2}  # closed
     session.listTasks.return_value = []
+    session.listTaskOutput.return_value = {}
+    session.downloadTaskOutput.return_value = b""
     session.packageListAdd.return_value = None
     session.uploadWrapper.return_value = None
     session.logout.return_value = None

@@ -3,12 +3,15 @@
 Applied automatically to all SRPMs (the target and dependencies) before submit.
 Two transformations are applied:
 
-1. `%define _unpackaged_files_terminate_build 0` is added at the start of the spec,
-   so that unpackaged files left in BUILDROOT do not fail the build.
-2. The `%check` section is cut out entirely: upstream testsuites often require
+1. The `%check` section is cut out entirely: upstream testsuites often require
    network access, specific pid/process limits and other things that our
    sandbox mock does not have; instead we rely on a separate smoke install after
-   tagging.
+   tagging. Always applied.
+2. Optionally added at the start of the spec:
+   `%define _unpackaged_files_terminate_build 0`, so that unpackaged files left in BUILDROOT
+   do not fail the build. Applied conditionally, only on
+   retry after a build that failed with Installed (but unpackaged) file(s) found
+   (see the retry logic in `vibebuild/builder.py`).
 
 Both mechanisms are standard RPM/Fedora: the macro is documented in upstream
 `/usr/lib/rpm/macros`, `%check` is an ordinary optional spec section.
@@ -75,8 +78,13 @@ def _section_token(line: str) -> Optional[str]:
     return name if name in _SECTION_NAMES else None
 
 
-def patch_spec_text(spec: str) -> str:
-    """Apply both edits to the spec text. Idempotent."""
+def patch_spec_text(spec: str, add_unpackaged_macro: bool = False) -> str:
+    """Apply the edits to the spec text. Idempotent.
+
+    `%check` is always cut out. `UNPACKAGED_MACRO` is added only if
+    `add_unpackaged_macro=True`, used on retry after an error
+    "Installed (but unpackaged) file(s) found".
+    """
     out: list[str] = []
     in_check = False
     has_macro = UNPACKAGED_MACRO in spec
@@ -90,7 +98,7 @@ def patch_spec_text(spec: str) -> str:
         if not in_check:
             out.append(line)
     body = "".join(out)
-    if not has_macro:
+    if add_unpackaged_macro and not has_macro:
         body = UNPACKAGED_MACRO + "\n" + body
     return body
 
@@ -124,19 +132,29 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
         )
 
 
-def patch_srpm(srpm_path: str, work_dir: Path, timeout: int = 600) -> str:
+def patch_srpm(
+    srpm_path: str,
+    work_dir: Path,
+    timeout: int = 600,
+    add_unpackaged_macro: bool = False,
+) -> str:
     """Unpack the SRPM, patch the spec, rebuild a new SRPM alongside.
 
     Returns the absolute path to the new `.src.rpm`. The NVR is preserved because
     Version/Release in the spec do not change. On any error raises
     `VibeBuildError`, so the calling code can catch it and fall back to the original
     SRPM.
+
+    When `add_unpackaged_macro=True`, the start of the spec gets
+    `%define _unpackaged_files_terminate_build 0`. By default the flag is off:
+    the builder raises it only on retry after the corresponding error.
     """
     srpm = Path(srpm_path).resolve()
     if not srpm.exists():
         raise VibeBuildError(f"SRPM not found: {srpm}")
 
-    target = Path(work_dir) / f"{srpm.stem}-patched"
+    suffix = "-patched-allow-unpackaged" if add_unpackaged_macro else "-patched"
+    target = Path(work_dir) / f"{srpm.stem}{suffix}"
     sources_dir = target / "SOURCES"
     specs_dir = target / "SPECS"
     target.mkdir(parents=True, exist_ok=True)
@@ -153,7 +171,9 @@ def patch_srpm(srpm_path: str, work_dir: Path, timeout: int = 600) -> str:
 
     spec_dst = specs_dir / spec_files[0].name
     spec_files[0].rename(spec_dst)
-    spec_dst.write_text(patch_spec_text(spec_dst.read_text()))
+    spec_dst.write_text(
+        patch_spec_text(spec_dst.read_text(), add_unpackaged_macro=add_unpackaged_macro)
+    )
 
     result = subprocess.run(
         [
