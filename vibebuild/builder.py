@@ -111,6 +111,7 @@ class KojiBuilder:
         fedora_release: str = "rawhide",
         force: bool = False,
         idempotent: bool = False,
+        build_all_deps: bool = False,
     ):
         self.koji_server = koji_server
         self.koji_web_url = koji_web_url
@@ -123,6 +124,7 @@ class KojiBuilder:
         self.no_ssl_verify = no_ssl_verify
         self.force = force  # disable the idempotency skip
         self.idempotent = idempotent  # enable the idempotency pre-check (off by default)
+        self.build_all_deps = build_all_deps
 
         self.koji_client = KojiClient(
             server=koji_server,
@@ -151,6 +153,7 @@ class KojiBuilder:
             koji_client=self.koji_client,
             koji_tag=build_tag,
             name_resolver=self.name_resolver,
+            build_all_deps=build_all_deps,
         )
 
         self.fetcher = SRPMFetcher(

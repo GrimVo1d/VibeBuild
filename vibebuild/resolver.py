@@ -233,10 +233,12 @@ class DependencyResolver:
         koji_client: Optional[KojiClient] = None,
         koji_tag: str = "fedora-build",
         name_resolver=None,
+        build_all_deps: bool = False,
     ):
         self.koji = koji_client or KojiClient()
         self.koji_tag = koji_tag
         self.name_resolver = name_resolver
+        self.build_all_deps = build_all_deps
         self._available_packages: Optional[set[str]] = None
         self._dependency_graph: dict[str, DependencyNode] = {}
         self._has_external_repos: Optional[bool] = None
@@ -422,7 +424,9 @@ class DependencyResolver:
             # are truly missing.  Since we already checked package_exists
             # above and it returned False, any dep not in our package list
             # must come from external repos.
-            if has_ext_repos:
+            # When build_all_deps=True this assumption is bypassed — every dep
+            # in the graph is fetched from Fedora and built locally.
+            if has_ext_repos and not self.build_all_deps:
                 check_name = resolved_name if resolved_name != name else name
                 if not self._is_our_package(check_name):
                     logger.debug(
