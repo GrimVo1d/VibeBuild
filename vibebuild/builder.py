@@ -315,6 +315,14 @@ class KojiBuilder:
         try:
             task_id = session.build(server_srpm, self.target, build_opts)
         except koji.GenericError as exc:
+            msg = str(exc)
+            if "Build already exists" in msg and "state=COMPLETE" in msg:
+                # Extract existing task_id from the error message if possible,
+                # otherwise return 0 as a sentinel — caller checks for None/0.
+                import re as _re
+
+                m = _re.search(r"task_id.*?(\d+)", msg)
+                return int(m.group(1)) if m else 0
             raise KojiBuildError(f"session.build failed: {exc}")
         return int(task_id)
 
@@ -631,7 +639,12 @@ class KojiBuilder:
 
         logger.info("Analyzing dependencies...")
 
+        _download_seen: set[str] = set()
+
         def srpm_resolver(pkg_name: str) -> Optional[str]:
+            if pkg_name in _download_seen:
+                return None
+            _download_seen.add(pkg_name)
             try:
                 logger.info(f"Downloading dependency: {pkg_name}")
                 path = self.fetcher.download_srpm(pkg_name)
