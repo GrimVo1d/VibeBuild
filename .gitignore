@@ -43,6 +43,8 @@ Thumbs.db
 
 # Environment
 .env
+.env.*
+!.env.default
 
 # VibeBuild specific
 /downloads/
@@ -50,6 +52,11 @@ Thumbs.db
 *.src.rpm
 *.rpm
 vibebuild/data/*.joblib
+
+# Script outputs
+training_data.json
+prod_validation_report.json
+perf_bench.json
 
 # Ansible
 *.retry
