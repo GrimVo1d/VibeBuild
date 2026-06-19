@@ -282,8 +282,7 @@ Examples:
         "--no-idempotency",
         action="store_true",
         help=(
-            "Disable the idempotency pre-check "
-            "(by default vibebuild skips already built packages)"
+            "Disable the idempotency pre-check (by default vibebuild skips already built packages)"
         ),
     )
 
@@ -612,8 +611,7 @@ def _train_subcommand(argv: list[str]) -> int:
     sub = argparse.ArgumentParser(
         prog="vibebuild train",
         description=(
-            "Train the ML resolver: collect training data from Fedora repodata "
-            "and train the model"
+            "Train the ML resolver: collect training data from Fedora repodata and train the model"
         ),
     )
     sub.add_argument("--release", type=int, default=42, help="Fedora release (default 42)")
@@ -661,9 +659,9 @@ def _train_subcommand(argv: list[str]) -> int:
     print("=== Training finished ===")
     print(f"Train: {metrics.get('train_size')}, Test: {metrics.get('test_size')}")
     if "predicted" in metrics:
-        print(f"Coverage: {metrics['coverage']*100:.1f}%")
-        print(f"RPM accuracy: {metrics['rpm_accuracy']*100:.1f}%")
-        print(f"SRPM accuracy: {metrics['srpm_accuracy']*100:.1f}%")
+        print(f"Coverage: {metrics['coverage'] * 100:.1f}%")
+        print(f"RPM accuracy: {metrics['rpm_accuracy'] * 100:.1f}%")
+        print(f"SRPM accuracy: {metrics['srpm_accuracy'] * 100:.1f}%")
     print(f"Model: {opts.output}")
     return 0
 

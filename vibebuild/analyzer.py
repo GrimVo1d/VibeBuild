@@ -354,9 +354,9 @@ def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:
 
     if p1.returncode != 0:
         raise InvalidSRPMError(
-            f"rpm2cpio failed for {srpm_path}: " f"{rpm2cpio_err.decode(errors='replace').strip()}"
+            f"rpm2cpio failed for {srpm_path}: {rpm2cpio_err.decode(errors='replace').strip()}"
         )
     if p2.returncode != 0:
         raise InvalidSRPMError(
-            f"cpio failed to unpack {srpm_path}: " f"{cpio_err.decode(errors='replace').strip()}"
+            f"cpio failed to unpack {srpm_path}: {cpio_err.decode(errors='replace').strip()}"
         )

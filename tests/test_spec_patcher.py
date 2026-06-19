@@ -127,14 +127,14 @@ def test_check_at_end_of_file_strips_to_eof():
 
 def test_partial_keyword_not_treated_as_check():
     # %checkpoint, %check_some_macro and the like must not trigger the strip
-    spec = "Name: foo\n" "%checkpoint=true\n" "still here\n" "%files\n" "%{_bindir}/foo\n"
+    spec = "Name: foo\n%checkpoint=true\nstill here\n%files\n%{_bindir}/foo\n"
     patched = patch_spec_text(spec)
     assert "%checkpoint=true" in patched
     assert "still here" in patched
 
 
 def test_files_subpackage_resumes_after_check():
-    spec = "%check\n" "make test\n" "%files -n libfoo\n" "%{_libdir}/libfoo.so.*\n"
+    spec = "%check\nmake test\n%files -n libfoo\n%{_libdir}/libfoo.so.*\n"
     patched = patch_spec_text(spec)
     assert "make test" not in patched
     assert "%files -n libfoo" in patched
@@ -143,7 +143,7 @@ def test_files_subpackage_resumes_after_check():
 
 def test_macro_reference_in_post_not_stripped():
     # Between %check and %files comes %post, which is also a section and must resume parsing.
-    spec = "%check\n" "make test\n" "%post\n" "/sbin/ldconfig\n" "%files\n" "%{_bindir}/foo\n"
+    spec = "%check\nmake test\n%post\n/sbin/ldconfig\n%files\n%{_bindir}/foo\n"
     patched = patch_spec_text(spec)
     assert "make test" not in patched
     assert "%post" in patched
