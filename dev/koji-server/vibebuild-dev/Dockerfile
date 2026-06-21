@@ -1,4 +1,5 @@
-FROM fedora:42
+ARG FEDORA_VERSION=44
+FROM fedora:${FEDORA_VERSION}
 
 # Build/runtime tools for vibebuild and its dependencies
 RUN dnf install -y \

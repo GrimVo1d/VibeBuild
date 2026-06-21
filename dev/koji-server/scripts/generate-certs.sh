@@ -26,12 +26,16 @@ openssl genrsa -out koji_ca_cert.key $KEY_SIZE 2>/dev/null
 openssl req -new -x509 -days $DAYS \
     -key koji_ca_cert.key \
     -out koji_ca_cert.crt \
-    -subj "/C=US/ST=Local/L=Local/O=Koji/OU=CA/CN=Koji CA"
+    -subj "/C=US/ST=Local/L=Local/O=Koji/OU=CA/CN=Koji CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "subjectKeyIdentifier=hash"
 
 generate_cert() {
     local name="$1"
     local cn="$2"
-    local san="${3:-}"
+    local eku="$3"
+    local san="${4:-}"
 
     echo "==> Generating $name certificate (CN=$cn)..."
     openssl genrsa -out "${name}.key" $KEY_SIZE 2>/dev/null
@@ -40,37 +44,35 @@ generate_cert() {
         -out "${name}.csr" \
         -subj "/C=US/ST=Local/L=Local/O=Koji/OU=${name}/CN=${cn}"
 
-    if [ -n "$san" ]; then
-        cat > "${name}.ext" <<EXTEOF
-[v3_req]
-subjectAltName=${san}
-EXTEOF
-        openssl x509 -req -days $DAYS \
-            -in "${name}.csr" \
-            -CA koji_ca_cert.crt \
-            -CAkey koji_ca_cert.key \
-            -CAcreateserial \
-            -out "${name}.crt" \
-            -extfile "${name}.ext" \
-            -extensions v3_req 2>/dev/null
-        rm -f "${name}.ext"
-    else
-        openssl x509 -req -days $DAYS \
-            -in "${name}.csr" \
-            -CA koji_ca_cert.crt \
-            -CAkey koji_ca_cert.key \
-            -CAcreateserial \
-            -out "${name}.crt" 2>/dev/null
-    fi
+    {
+        echo "[v3_req]"
+        echo "basicConstraints=critical,CA:FALSE"
+        echo "keyUsage=critical,digitalSignature,keyEncipherment"
+        echo "extendedKeyUsage=${eku}"
+        echo "subjectKeyIdentifier=hash"
+        echo "authorityKeyIdentifier=keyid,issuer"
+        if [ -n "$san" ]; then
+            echo "subjectAltName=${san}"
+        fi
+    } > "${name}.ext"
+    openssl x509 -req -days $DAYS \
+        -in "${name}.csr" \
+        -CA koji_ca_cert.crt \
+        -CAkey koji_ca_cert.key \
+        -CAcreateserial \
+        -out "${name}.crt" \
+        -extfile "${name}.ext" \
+        -extensions v3_req 2>/dev/null
+    rm -f "${name}.ext"
 
     cat "${name}.crt" "${name}.key" > "${name}.pem"
     rm -f "${name}.csr"
 }
 
-generate_cert "kojihub" "koji-hub" "DNS:localhost,DNS:koji-hub,IP:127.0.0.1"
-generate_cert "kojiweb" "koji-web" "DNS:localhost,DNS:koji-hub,IP:127.0.0.1"
-generate_cert "kojiadmin" "kojiadmin"
-generate_cert "kojibuilder" "kojibuilder"
+generate_cert "kojihub" "koji-hub" "serverAuth" "DNS:localhost,DNS:koji-hub,IP:127.0.0.1"
+generate_cert "kojiweb" "koji-web" "serverAuth,clientAuth" "DNS:localhost,DNS:koji-hub,IP:127.0.0.1"
+generate_cert "kojiadmin" "kojiadmin" "clientAuth"
+generate_cert "kojibuilder" "kojibuilder" "clientAuth"
 
 chmod 644 *.crt *.pem
 chmod 600 *.key

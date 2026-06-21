@@ -6,8 +6,12 @@ COMPOSE = docker compose
 	@cp .env.default .env
 	@echo "Created .env from .env.default"
 
-certs:
-	@bash scripts/generate-certs.sh
+# Generated in a Fedora container (OpenSSL 3, same as the hub) and handed back to the host user.
+certs: .env
+	@set -a; . ./.env; set +a; \
+	docker run --rm -v "$$PWD":/stand -w /stand -e HOST_UID=$$(id -u) -e HOST_GID=$$(id -g) \
+		fedora:$${FEDORA_VERSION:-44} bash -c \
+		'dnf -q -y install openssl >/dev/null && bash scripts/generate-certs.sh && chown -R "$$HOST_UID:$$HOST_GID" ssl'
 
 setup: .env certs
 	$(COMPOSE) up -d --build db koji-hub
@@ -20,12 +24,12 @@ setup: .env certs
 		timeout=$$((timeout - 2)); \
 	done
 	@bash scripts/koji-init.sh
-	$(COMPOSE) up -d --build koji-builder
-	@bash scripts/setup-client.sh
+	$(COMPOSE) up -d --build koji-builder vibebuild-dev
 	@echo ""
 	@echo "=== Setup complete ==="
 	@echo "Web UI:  https://localhost:$${KOJI_HTTPS_PORT:-8443}/koji"
-	@echo "Verify:  koji --noauth list-tags"
+	@echo "Client:  docker compose exec vibebuild-dev bash"
+	@echo "The first build repo (newRepo task) takes a few minutes: docker compose exec koji-hub koji list-tasks"
 
 stop:
 	$(COMPOSE) stop
@@ -41,6 +45,7 @@ clean:
 init:
 	@bash scripts/koji-init.sh
 
+# Optional: writes ~/.koji/config on the host (needs the koji CLI on the host).
 client:
 	@bash scripts/setup-client.sh
 

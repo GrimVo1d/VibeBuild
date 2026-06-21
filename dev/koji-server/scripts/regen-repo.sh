@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Manual trigger of the standard koji regen-repo task for the build tag.
+# Manual trigger of a newRepo task for the build tag. --make-task creates the task
+# directly: plain `regen-repo` only files a request for kojira, which the stand does not run.
 # Uses upstream createrepo_c from Fedora (part of the build group, see koji-init.sh).
-# Idempotent: if the task is already running, koji returns its task id without starting it again.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,5 +22,5 @@ fi
 TAG="${1:-${KOJI_BUILD_TAG}}"
 
 echo "==> koji regen-repo ${TAG}"
-$COMPOSE exec -T koji-hub koji regen-repo "${TAG}" --wait
+$COMPOSE exec -T koji-hub koji regen-repo "${TAG}" --make-task --wait
 echo "==> repo for ${TAG} regenerated"

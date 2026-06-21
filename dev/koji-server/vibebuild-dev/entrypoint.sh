@@ -12,8 +12,8 @@ topurl = https://koji-hub/kojifiles
 cert = /etc/pki/koji/kojiadmin.pem
 serverca = /etc/pki/koji/koji_ca_cert.crt
 authtype = ssl
-target = f42
-build_tag = f42-build
+target = ${KOJI_TARGET:-f44}
+build_tag = ${KOJI_BUILD_TAG:-f44-build}
 EOF
 
 # Trust the CA for curl/wget/requests

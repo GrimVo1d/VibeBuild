@@ -9,10 +9,7 @@ source .env
 
 COMPOSE="docker compose"
 
-# Detect host architecture so the dev stand works on both amd64 and arm64.
-# Override with KOJI_ARCH=<arch> in environment if a cross-arch koji is wanted.
-KOJI_ARCH="${KOJI_ARCH:-$(uname -m)}"
-echo "==> Using KOJI_ARCH=${KOJI_ARCH}"
+FEDORA_VERSION="${FEDORA_VERSION:-44}"
 
 echo "==> Waiting for Koji Hub to be ready..."
 for i in $(seq 1 60); do
@@ -30,6 +27,27 @@ done
 koji_exec() {
     $COMPOSE exec -T koji-hub koji "$@"
 }
+
+# Run a koji command that creates something. "Already exists" counts as success,
+# so the script can be re-run; any other error stops it.
+koji_ensure() {
+    local out
+    if out=$(koji_exec "$@" 2>&1); then
+        return 0
+    fi
+    if grep -qE "already (exists|in the database|subscribed|associated)" <<<"$out"; then
+        echo "    (already set up: koji $1 ${*:2})"
+        return 0
+    fi
+    echo "ERROR: koji $*" >&2
+    echo "$out" >&2
+    exit 1
+}
+
+# Architecture as the containers see it (on Apple Silicon the host says arm64,
+# koji and rpm say aarch64). Override with KOJI_ARCH=<arch>.
+KOJI_ARCH="${KOJI_ARCH:-$($COMPOSE exec -T koji-hub uname -m | tr -d '\r')}"
+echo "==> Using KOJI_ARCH=${KOJI_ARCH}, Fedora ${FEDORA_VERSION}"
 
 echo "==> Creating admin user..."
 $COMPOSE exec -T koji-hub python3 -c "
@@ -49,22 +67,22 @@ if cur.fetchone() is None:
 else:
     print('    Admin user already exists.')
 conn.close()
-" 2>/dev/null || echo "    (admin user may already exist)"
+"
 
 echo "==> Adding builder host..."
-koji_exec add-host kojibuilder "${KOJI_ARCH}" 2>/dev/null || echo "    (host may already exist)"
-koji_exec add-host-to-channel kojibuilder createrepo 2>/dev/null || echo "    (channel assignment may already exist)"
+koji_ensure add-host kojibuilder "${KOJI_ARCH}"
+koji_ensure add-host-to-channel kojibuilder createrepo
 
 echo "==> Creating tags..."
-koji_exec add-tag ${KOJI_TAG} --arches="${KOJI_ARCH}" 2>/dev/null || echo "    (tag ${KOJI_TAG} may already exist)"
-koji_exec add-tag ${KOJI_BUILD_TAG} --parent=${KOJI_TAG} --arches="${KOJI_ARCH}" 2>/dev/null || echo "    (tag ${KOJI_BUILD_TAG} may already exist)"
+koji_ensure add-tag "${KOJI_TAG}" --arches="${KOJI_ARCH}"
+koji_ensure add-tag "${KOJI_BUILD_TAG}" --parent="${KOJI_TAG}" --arches="${KOJI_ARCH}"
 
 echo "==> Creating build target..."
-koji_exec add-target ${KOJI_TARGET} ${KOJI_BUILD_TAG} ${KOJI_TAG} 2>/dev/null || echo "    (target may already exist)"
+koji_ensure add-target "${KOJI_TARGET}" "${KOJI_BUILD_TAG}" "${KOJI_TAG}"
 
 echo "==> Adding build groups to ${KOJI_BUILD_TAG}..."
-koji_exec add-group ${KOJI_BUILD_TAG} build 2>/dev/null || true
-koji_exec add-group ${KOJI_BUILD_TAG} srpm-build 2>/dev/null || true
+koji_ensure add-group "${KOJI_BUILD_TAG}" build
+koji_ensure add-group "${KOJI_BUILD_TAG}" srpm-build
 
 BUILD_PKGS="bash bzip2 coreutils cpio diffutils fedora-release findutils gawk \
 gcc gcc-c++ \
@@ -78,27 +96,27 @@ which xz createrepo_c"
 SRPM_BUILD_PKGS="bash fedora-release rpm-build redhat-rpm-config shadow-utils"
 
 for pkg in $BUILD_PKGS; do
-    koji_exec add-group-pkg ${KOJI_BUILD_TAG} build "$pkg" 2>/dev/null || true
+    koji_ensure add-group-pkg "${KOJI_BUILD_TAG}" build "$pkg"
 done
 
 for pkg in $SRPM_BUILD_PKGS; do
-    koji_exec add-group-pkg ${KOJI_BUILD_TAG} srpm-build "$pkg" 2>/dev/null || true
+    koji_ensure add-group-pkg "${KOJI_BUILD_TAG}" srpm-build "$pkg"
 done
 
 echo "==> Adding external Fedora repositories..."
-koji_exec add-external-repo -t ${KOJI_BUILD_TAG} \
-    f42-releases \
-    'https://dl.fedoraproject.org/pub/fedora/linux/releases/42/Everything/$arch/os/' \
-    2>/dev/null || echo "    (repo f42-releases may already exist)"
+# Create first, then attach: a re-run attaches a repo that exists but is not on the tag yet.
+FEDORA_MIRROR="https://dl.fedoraproject.org/pub/fedora/linux"
+koji_ensure add-external-repo "f${FEDORA_VERSION}-releases" \
+    "${FEDORA_MIRROR}/releases/${FEDORA_VERSION}/Everything/\$arch/os/"
+koji_ensure add-external-repo "f${FEDORA_VERSION}-updates" \
+    "${FEDORA_MIRROR}/updates/${FEDORA_VERSION}/Everything/\$arch/"
+koji_ensure add-external-repo -t "${KOJI_BUILD_TAG}" -p 5 "f${FEDORA_VERSION}-releases"
+koji_ensure add-external-repo -t "${KOJI_BUILD_TAG}" -p 10 "f${FEDORA_VERSION}-updates"
 
-koji_exec add-external-repo -t ${KOJI_BUILD_TAG} \
-    f42-updates \
-    'https://dl.fedoraproject.org/pub/fedora/linux/updates/42/Everything/$arch/' \
-    2>/dev/null || echo "    (repo f42-updates may already exist)"
-
-echo "==> Regenerating repository (this may take a while)..."
-koji_exec regen-repo ${KOJI_BUILD_TAG} 2>/dev/null || echo "    (regen-repo may already be running)"
+echo "==> Regenerating repository (needs koji-builder running, takes a few minutes)..."
+# --make-task: plain regen-repo only files a request for kojira, which the stand does not run.
+koji_exec regen-repo --make-task --nowait "${KOJI_BUILD_TAG}"
 
 echo ""
 echo "=== Koji initialization complete ==="
-echo "Try: koji --noauth list-tags"
+echo "Try: docker compose exec koji-hub koji list-tags"

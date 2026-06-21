@@ -1,4 +1,5 @@
-FROM fedora:42
+ARG FEDORA_VERSION=44
+FROM fedora:${FEDORA_VERSION}
 
 RUN dnf install -y \
     koji-hub koji-web \
@@ -16,7 +17,7 @@ COPY httpd-koji.conf /etc/httpd/conf.d/kojihub.conf
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-RUN mkdir -p /root/.koji && printf '[koji]\nserver = https://localhost/kojihub\ncert = /etc/pki/koji/kojiadmin.pem\nserverca = /etc/pki/koji/koji_ca_cert.crt\nauthtype = ssl\n' > /root/.koji/config
+RUN mkdir -p /root/.koji && printf '[koji]\nserver = https://localhost/kojihub\nweburl = https://localhost/koji\ncert = /etc/pki/koji/kojiadmin.pem\nserverca = /etc/pki/koji/koji_ca_cert.crt\nauthtype = ssl\n' > /root/.koji/config
 
 RUN sed -i 's/^Listen 443/#Listen 443/' /etc/httpd/conf.d/ssl.conf && \
     sed -i '/<VirtualHost _default_:443>/,/<\/VirtualHost>/d' /etc/httpd/conf.d/ssl.conf

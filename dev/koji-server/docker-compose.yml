@@ -16,12 +16,16 @@ services:
       retries: 10
 
   koji-hub:
-    build: ./koji-hub
+    build:
+      context: ./koji-hub
+      args:
+        FEDORA_VERSION: ${FEDORA_VERSION:-44}
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "${KOJI_HTTPS_PORT:-8443}:443"
+      # Web UI only; vibebuild-dev and the builder talk to the hub over koji-net.
+      - "127.0.0.1:${KOJI_HTTPS_PORT:-8443}:443"
     volumes:
       - ./ssl:/etc/pki/koji:ro,Z
       - koji-data:/mnt/koji
@@ -39,7 +43,10 @@ services:
       start_period: 30s
 
   koji-builder:
-    build: ./koji-builder
+    build:
+      context: ./koji-builder
+      args:
+        FEDORA_VERSION: ${FEDORA_VERSION:-44}
     depends_on:
       koji-hub:
         condition: service_healthy
@@ -51,7 +58,10 @@ services:
       - koji-net
 
   vibebuild-dev:
-    build: ./vibebuild-dev
+    build:
+      context: ./vibebuild-dev
+      args:
+        FEDORA_VERSION: ${FEDORA_VERSION:-44}
     depends_on:
       koji-hub:
         condition: service_healthy
@@ -59,6 +69,9 @@ services:
       - ../..:/workspace
       - ./ssl:/etc/pki/koji:ro,Z
       - vibebuild-cache:/root/.cache/vibebuild
+    environment:
+      KOJI_TARGET: ${KOJI_TARGET:-f44}
+      KOJI_BUILD_TAG: ${KOJI_BUILD_TAG:-f44-build}
     networks:
       - koji-net
     # keep the container alive via entrypoint sleep infinity
