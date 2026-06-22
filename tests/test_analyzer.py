@@ -1,7 +1,5 @@
 """Tests for vibebuild.analyzer module."""
 
-from unittest.mock import Mock, patch
-
 import pytest
 
 from vibebuild.analyzer import (
@@ -10,6 +8,7 @@ from vibebuild.analyzer import (
     SpecAnalyzer,
     get_build_requires,
     get_package_info_from_srpm,
+    read_srpm_header,
 )
 from vibebuild.exceptions import InvalidSRPMError, SpecParseError
 
@@ -187,102 +186,6 @@ Source0: %{name}-%{version}.tar.gz
         assert "my-package-2.0.tar.gz" in result.source_urls[0]
 
 
-class TestGetBuildRequires:
-    def test_returns_list_of_strings(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-devel\ngcc\nmake >= 4.0\n"
-        mock_subprocess_run.return_value.stderr = ""
-
-        with patch("vibebuild.analyzer.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            mock_path.return_value.suffix = ".rpm"
-            mock_path.return_value.name = "test.src.rpm"
-            result = get_build_requires("/fake/test.src.rpm")
-
-        assert isinstance(result, list)
-        assert "python3-devel" in result
-        assert "gcc" in result
-        assert "make" in result
-
-    def test_raises_on_missing_file(self):
-        with pytest.raises(FileNotFoundError):
-            get_build_requires("/nonexistent/file.src.rpm")
-
-    def test_raises_on_invalid_srpm_extension(self, tmp_path):
-        invalid_file = tmp_path / "not-an-srpm.txt"
-        invalid_file.write_text("not an srpm")
-
-        with pytest.raises(InvalidSRPMError, match="Not a valid SRPM"):
-            get_build_requires(str(invalid_file))
-
-    def test_raises_on_rpm2cpio_failure(self, tmp_path, mock_subprocess_run):
-        import subprocess
-
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm content")
-        mock_subprocess_run.side_effect = subprocess.CalledProcessError(
-            returncode=1, cmd=["rpm2cpio"], stderr=b"rpm2cpio failed"
-        )
-
-        with pytest.raises(InvalidSRPMError, match="Failed to extract"):
-            get_build_requires(str(srpm))
-
-    def test_filters_rpmlib_dependencies(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = """
-python3-devel
-rpmlib(CompressedFileNames) <= 3.0.4-1
-rpmlib(FileDigests) <= 4.6.0-1
-gcc
-/bin/sh
-"""
-        mock_subprocess_run.return_value.stderr = ""
-
-        with patch("vibebuild.analyzer.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            mock_path.return_value.suffix = ".rpm"
-            mock_path.return_value.name = "test.src.rpm"
-            result = get_build_requires("/fake/test.src.rpm")
-
-        assert "python3-devel" in result
-        assert "gcc" in result
-        assert not any("rpmlib" in r for r in result)
-        assert not any(r.startswith("/") for r in result)
-
-
-class TestGetPackageInfoFromSrpm:
-    def test_extracts_package_info(self, tmp_path, mock_subprocess_popen, sample_spec_content):
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm")
-        spec_file = tmp_path / "test-package.spec"
-        spec_file.write_text(sample_spec_content)
-
-        with patch("vibebuild.analyzer.tempfile.TemporaryDirectory") as mock_tmpdir:
-            mock_tmpdir.return_value.__enter__ = Mock(return_value=str(tmp_path))
-            mock_tmpdir.return_value.__exit__ = Mock(return_value=False)
-            result = get_package_info_from_srpm(str(srpm), use_cache=False)
-
-        assert result.name == "test-package"
-        assert result.version == "1.0"
-
-    def test_raises_on_missing_file(self):
-        with pytest.raises(FileNotFoundError):
-            get_package_info_from_srpm("/nonexistent/file.src.rpm")
-
-    def test_raises_when_no_spec_found(self, tmp_path, mock_subprocess_popen):
-        srpm = tmp_path / "empty.src.rpm"
-        srpm.write_text("fake srpm")
-
-        with patch("vibebuild.analyzer.tempfile.TemporaryDirectory") as mock_tmpdir:
-            empty_dir = tmp_path / "empty_extract"
-            empty_dir.mkdir()
-            mock_tmpdir.return_value.__enter__ = Mock(return_value=str(empty_dir))
-            mock_tmpdir.return_value.__exit__ = Mock(return_value=False)
-
-            with pytest.raises(InvalidSRPMError, match="No spec file found"):
-                get_package_info_from_srpm(str(srpm), use_cache=False)
-
-
 class TestSpecAnalyzerEdgeCases:
     def test_extract_value_without_colon(self):
         """_extract_value should return '' when line has no colon."""
@@ -351,56 +254,130 @@ class TestSpecAnalyzerBranchCoverage:
         req_names = [r.name for r in result.build_requires]
         assert "" not in req_names
 
-    def test_duplicate_requires_in_rpm_output(self, mock_subprocess_run):
-        """get_build_requires should deduplicate requires."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-devel\ngcc\npython3-devel\ngcc\n"
-        mock_subprocess_run.return_value.stderr = ""
 
-        with patch("vibebuild.analyzer.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            mock_path.return_value.suffix = ".rpm"
-            mock_path.return_value.name = "test.src.rpm"
-            result = get_build_requires("/fake/test.src.rpm")
-
-        assert result.count("python3-devel") == 1
-        assert result.count("gcc") == 1
+def _header(name, version, release, *requires):
+    """rpm -qp --qf output for _HEADER_QUERY."""
+    return "".join(f"{x}\n" for x in (name, version, release)) + "".join(
+        "\t".join(r) + "\n" for r in requires
+    )
 
 
-class TestGetBuildRequiresEdgeCases:
-    def test_rpm2cpio_not_found(self, tmp_path, mock_subprocess_run):
-        """get_build_requires should handle rpm2cpio not found."""
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm content")
-        mock_subprocess_run.side_effect = FileNotFoundError("rpm2cpio not found")
+@pytest.fixture
+def srpm(tmp_path):
+    path = tmp_path / "hello-2.12.3-2.fc45.src.rpm"
+    path.write_bytes(b"fake srpm")
+    return path
 
-        with pytest.raises(InvalidSRPMError, match="rpm2cpio not found"):
-            get_build_requires(str(srpm))
 
-    def test_rpm_qp_failure(self, tmp_path, mock_subprocess_run):
-        """get_build_requires should raise on rpm -qp failure."""
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm content")
-        mock_subprocess_run.side_effect = [
-            Mock(returncode=0, stdout=b"", stderr=b""),  # rpm2cpio
-            Mock(returncode=1, stdout="", stderr="rpm query failed"),  # rpm -qp
+class TestReadSrpmHeader:
+    def test_nvr_comes_from_header(self, srpm, mock_subprocess_run):
+        # %autorelease in the spec text: the header has the real release
+        mock_subprocess_run.return_value.stdout = _header("hello", "2.12.3", "2.fc45")
+
+        info = read_srpm_header(str(srpm))
+
+        assert (info.name, info.version, info.release) == ("hello", "2.12.3", "2.fc45")
+        assert info.nvr == "hello-2.12.3-2.fc45"
+        argv = mock_subprocess_run.call_args.args[0]
+        assert argv[:3] == ["rpm", "-qp", "--qf"]
+        assert argv[-1] == str(srpm)
+
+    def test_build_requires_keep_version_constraints(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.stdout = _header(
+            "PyYAML",
+            "6.0.3",
+            "6.fc45",
+            ("gcc", "", ""),
+            ("python3dist(cython)", ">=", "3"),
+            ("(python3dist(tomli) if python3-devel < 3.11)", "", ""),
+        )
+
+        reqs = read_srpm_header(str(srpm)).build_requires
+
+        assert [str(r) for r in reqs] == [
+            "gcc",
+            "python3dist(cython) >= 3",
+            "(python3dist(tomli) if python3-devel < 3.11)",
         ]
+        assert reqs[0].operator is None and reqs[0].version is None
 
-        with pytest.raises(InvalidSRPMError, match="Failed to query"):
-            get_build_requires(str(srpm))
+    def test_skips_rpmlib_file_deps_and_duplicates(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.stdout = _header(
+            "pkg",
+            "1",
+            "1",
+            ("python3-devel", "", ""),
+            ("python3-devel", "", ""),
+            ("rpmlib(CompressedFileNames)", "<=", "3.0.4-1"),
+            ("/usr/bin/sh", "", ""),
+            ("make", "", ""),
+        )
 
-    def test_stdout_with_empty_lines(self, mock_subprocess_run):
-        """get_build_requires should skip empty lines in output."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "\n\npython3-devel\n\ngcc\n\n"
-        mock_subprocess_run.return_value.stderr = ""
+        names = [r.name for r in read_srpm_header(str(srpm)).build_requires]
 
-        with patch("vibebuild.analyzer.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            mock_path.return_value.suffix = ".rpm"
-            mock_path.return_value.name = "test.src.rpm"
-            result = get_build_requires("/fake/test.src.rpm")
+        assert names == ["python3-devel", "make"]
 
-        assert "python3-devel" in result
-        assert "gcc" in result
-        assert "" not in result
+    def test_missing_file(self):
+        with pytest.raises(FileNotFoundError):
+            read_srpm_header("/nonexistent/file.src.rpm")
+
+    def test_not_an_srpm(self, tmp_path):
+        path = tmp_path / "not-an-srpm.txt"
+        path.write_text("x")
+        with pytest.raises(InvalidSRPMError, match="Not a valid SRPM"):
+            read_srpm_header(str(path))
+
+    def test_rpm_missing(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.side_effect = FileNotFoundError("rpm")
+        with pytest.raises(InvalidSRPMError, match="rpm not found"):
+            read_srpm_header(str(srpm))
+
+    def test_rpm_timeout(self, srpm, mock_subprocess_run):
+        import subprocess
+
+        mock_subprocess_run.side_effect = subprocess.TimeoutExpired(cmd="rpm", timeout=60)
+        with pytest.raises(InvalidSRPMError, match="timed out"):
+            read_srpm_header(str(srpm))
+
+    def test_rpm_fails(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.returncode = 1
+        mock_subprocess_run.return_value.stderr = "error: not an rpm package\n"
+        with pytest.raises(InvalidSRPMError, match="not an rpm package"):
+            read_srpm_header(str(srpm))
+
+    def test_unexpected_output(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.stdout = "hello\n"
+        with pytest.raises(InvalidSRPMError, match="Unexpected rpm output"):
+            read_srpm_header(str(srpm))
+
+
+class TestGetBuildRequires:
+    def test_returns_build_requirements(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.stdout = _header(
+            "pkg", "1", "1", ("make", ">=", "4.0"), ("gcc", "", "")
+        )
+
+        reqs = get_build_requires(str(srpm))
+
+        assert all(isinstance(r, BuildRequirement) for r in reqs)
+        assert [str(r) for r in reqs] == ["make >= 4.0", "gcc"]
+
+
+class TestGetPackageInfoFromSrpm:
+    def test_reads_header(self, srpm, mock_subprocess_run):
+        mock_subprocess_run.return_value.stdout = _header("hello", "2.12.3", "2.fc45")
+
+        info = get_package_info_from_srpm(str(srpm), use_cache=False)
+
+        assert info.nvr == "hello-2.12.3-2.fc45"
+
+    def test_uses_cache(self, srpm, mock_subprocess_run, mocker):
+        cached = PackageInfo("cached", "1", "1", [], [])
+        mocker.patch("vibebuild._spec_cache.get", return_value=cached)
+
+        assert get_package_info_from_srpm(str(srpm)) is cached
+        mock_subprocess_run.assert_not_called()
+
+    def test_missing_file(self):
+        with pytest.raises(FileNotFoundError):
+            get_package_info_from_srpm("/nonexistent/file.src.rpm")

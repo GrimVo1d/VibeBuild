@@ -2,7 +2,7 @@
 Persistent SRPM parse cache. The key is sha256 of the file + size + vibebuild version.
 
 On a repeated call of `get_package_info_from_srpm(path)` on the same SRPM
-the parsing (rpm2cpio + cpio + spec analysis) is skipped.
+the header query is skipped.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ _CACHE_DIR = Path.home() / ".cache" / "vibebuild" / "spec-cache"
 # To detect freshness: sha256 of the first N bytes + the full size.
 # A full sha256 on a 100 MB SRPM is slow (~500 ms), which eats the whole gain.
 _SAMPLE_BYTES = 4 * 1024 * 1024  # 4 MB
+_FORMAT = "srpm-header"
 
 
 def _file_key(srpm_path: Path) -> str:
@@ -36,6 +37,9 @@ def _file_key(srpm_path: Path) -> str:
         return ""
     h = hashlib.sha256()
     h.update(_VIBEBUILD_VERSION.encode())
+    h.update(b"|")
+    # Bumped when the way PackageInfo is produced changes, so older entries are not reused.
+    h.update(_FORMAT.encode())
     h.update(b"|")
     h.update(str(st.st_size).encode())
     h.update(b"|")

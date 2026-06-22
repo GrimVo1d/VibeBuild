@@ -2,10 +2,8 @@
 SRPM and spec file analyzer for extracting BuildRequires.
 """
 
-import os
 import re
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -214,149 +212,121 @@ class SpecAnalyzer:
         return requirements
 
 
-def get_build_requires(srpm_path: str) -> list[str]:
+# One header line each for name, version and release, then one line per requirement:
+# name, comparison flags and version, tab-separated. rpm expanded every macro when it
+# built the SRPM, so this is exact where reading the spec text is not (%autorelease,
+# %{?dist}, conditionals, %generate_buildrequires on Fedora Koji SRPMs).
+_HEADER_QUERY = (
+    "%{NAME}\\n%{VERSION}\\n%{RELEASE}\\n"
+    "[%{REQUIRENAME}\\t%{REQUIREFLAGS:depflags}\\t%{REQUIREVERSION}\\n]"
+)
+
+
+def _check_srpm_path(srpm_path: str) -> Path:
+    path = Path(srpm_path)
+    if not path.exists():
+        raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+    if path.suffix != ".rpm" or ".src." not in path.name:
+        raise InvalidSRPMError(f"Not a valid SRPM file: {srpm_path}")
+    return path
+
+
+def read_srpm_header(srpm_path: str) -> PackageInfo:
     """
-    Extract BuildRequires from SRPM file.
-
-    This is a convenience function that extracts the spec file from SRPM
-    and returns list of package names required for building.
-
-    Args:
-        srpm_path: Path to .src.rpm file
-
-    Returns:
-        List of package names (without versions)
+    Read name, version, release and BuildRequires from the SRPM header.
 
     Raises:
-        FileNotFoundError: If SRPM doesn't exist
-        InvalidSRPMError: If SRPM is invalid
+        FileNotFoundError: If the SRPM does not exist
+        InvalidSRPMError: If the file is not an SRPM or rpm cannot read it
     """
-    srpm_path = Path(srpm_path)
-    if not srpm_path.exists():
-        raise FileNotFoundError(f"SRPM not found: {srpm_path}")
-
-    if not srpm_path.suffix == ".rpm" or ".src." not in srpm_path.name:
-        raise InvalidSRPMError(f"Not a valid SRPM file: {srpm_path}")
-
-    with tempfile.TemporaryDirectory():
-        try:
-            subprocess.run(
-                ["rpm2cpio", str(srpm_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise InvalidSRPMError(f"Failed to extract SRPM: {e.stderr.decode()}")
-        except FileNotFoundError:
-            raise InvalidSRPMError("rpm2cpio not found. Install rpm package.")
-
+    path = _check_srpm_path(srpm_path)
+    try:
         result = subprocess.run(
-            ["rpm", "-qp", "--requires", str(srpm_path)], capture_output=True, text=True
+            ["rpm", "-qp", "--qf", _HEADER_QUERY, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
+    except FileNotFoundError as exc:
+        raise InvalidSRPMError("rpm not found. Install the rpm package.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise InvalidSRPMError(f"Reading the header of {path} timed out") from exc
+    if result.returncode != 0:
+        raise InvalidSRPMError(f"Failed to query SRPM {path}: {result.stderr.strip()}")
 
-        if result.returncode != 0:
-            raise InvalidSRPMError(f"Failed to query SRPM: {result.stderr}")
+    lines = result.stdout.split("\n")
+    if len(lines) < 3 or not all(lines[:3]):
+        raise InvalidSRPMError(f"Unexpected rpm output for {path}")
+    name, version, release = lines[:3]
 
-        requires = []
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
+    build_requires: list[BuildRequirement] = []
+    for line in lines[3:]:
+        if not line.strip():
+            continue
+        req_name, flags, req_version = (line.split("\t") + ["", ""])[:3]
+        # rpmlib() entries are rpm features, file paths are not resolved by name
+        if req_name.startswith("rpmlib(") or req_name.startswith("/"):
+            continue
+        req = BuildRequirement(
+            name=req_name,
+            version=req_version or None,
+            operator=flags or None,
+        )
+        if req not in build_requires:
+            build_requires.append(req)
 
-            for op in SpecAnalyzer.VERSION_OPERATORS:
-                if op in line:
-                    line = line.split(op)[0].strip()
-                    break
+    return PackageInfo(
+        name=name,
+        version=version,
+        release=release,
+        build_requires=build_requires,
+        source_urls=[],
+    )
 
-            if line.startswith("rpmlib(") or line.startswith("/"):
-                continue
 
-            if line and line not in requires:
-                requires.append(line)
+def get_build_requires(srpm_path: str) -> list[BuildRequirement]:
+    """
+    Return the BuildRequires of an SRPM, with version constraints.
 
-        return requires
+    Raises:
+        FileNotFoundError: If the SRPM does not exist
+        InvalidSRPMError: If the file is not an SRPM or rpm cannot read it
+    """
+    return read_srpm_header(srpm_path).build_requires
 
 
 def get_package_info_from_srpm(srpm_path: str, use_cache: bool = True) -> PackageInfo:
     """
-    Extract full package information from SRPM.
+    Extract package information from an SRPM header.
 
     Args:
         srpm_path: Path to .src.rpm file
-        use_cache: use the persistent parse cache (default True).
-                    If the cache hits, skip rpm2cpio/cpio/parse.
+        use_cache: use the persistent parse cache (default True)
 
     Returns:
         PackageInfo with all extracted data
     """
-    srpm_path_obj = Path(srpm_path)
-    if not srpm_path_obj.exists():
-        raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+    _check_srpm_path(srpm_path)
 
     if use_cache:
         try:
             from vibebuild import _spec_cache
 
-            cached = _spec_cache.get(str(srpm_path_obj))
+            cached = _spec_cache.get(srpm_path)
             if cached is not None:
                 return cached
         except Exception:
             # any cache problem must not break the main work
             pass
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _extract_srpm(srpm_path_obj, tmpdir)
-
-        spec_files = list(Path(tmpdir).glob("*.spec"))
-        if not spec_files:
-            raise InvalidSRPMError(f"No spec file found in SRPM: {srpm_path_obj}")
-
-        analyzer = SpecAnalyzer()
-        info = analyzer.analyze_spec(str(spec_files[0]))
+    info = read_srpm_header(srpm_path)
 
     if use_cache:
         try:
             from vibebuild import _spec_cache
 
-            _spec_cache.put(str(srpm_path_obj), info)
+            _spec_cache.put(srpm_path, info)
         except Exception:
             pass
 
     return info
-
-
-def _extract_srpm(srpm_path: Path, dest_dir: str) -> None:
-    """Unpack an SRPM into dest_dir via rpm2cpio | cpio -idm (without a shell)."""
-    with open(os.devnull, "wb") as devnull:
-        p1 = subprocess.Popen(
-            ["rpm2cpio", str(srpm_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        p2 = subprocess.Popen(
-            ["cpio", "-idm"],
-            stdin=p1.stdout,
-            stdout=devnull,
-            stderr=subprocess.PIPE,
-            cwd=dest_dir,
-        )
-        # Close the pipe in the parent so that p2 gets EOF
-        assert p1.stdout is not None
-        p1.stdout.close()
-        try:
-            _, cpio_err = p2.communicate(timeout=120)
-            _, rpm2cpio_err = p1.communicate(timeout=120)
-        except subprocess.TimeoutExpired as exc:
-            p1.kill()
-            p2.kill()
-            raise InvalidSRPMError(f"Unpacking SRPM {srpm_path} timed out") from exc
-
-    if p1.returncode != 0:
-        raise InvalidSRPMError(
-            f"rpm2cpio failed for {srpm_path}: {rpm2cpio_err.decode(errors='replace').strip()}"
-        )
-    if p2.returncode != 0:
-        raise InvalidSRPMError(
-            f"cpio failed to unpack {srpm_path}: {cpio_err.decode(errors='replace').strip()}"
-        )

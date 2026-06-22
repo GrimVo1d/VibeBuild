@@ -409,8 +409,12 @@ def cmd_analyze(
     cert: Optional[str],
     serverca: Optional[str],
     no_ssl_verify: bool = False,
+    no_name_resolution: bool = False,
+    no_ml: bool = False,
+    ml_model_path: Optional[str] = None,
+    build_all_deps: bool = False,
 ) -> int:
-    """Analyze SRPM dependencies."""
+    """Analyze SRPM dependencies the same way a build would, without downloading or building."""
     print(f"Analyzing: {srpm_path}")
 
     try:
@@ -429,9 +433,17 @@ def cmd_analyze(
         koji_client = KojiClient(
             server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
         )
-        resolver = DependencyResolver(koji_client=koji_client, koji_tag=build_tag)
+        name_resolver = None
+        if not no_name_resolution:
+            name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
+        resolver = DependencyResolver(
+            koji_client=koji_client,
+            koji_tag=build_tag,
+            name_resolver=name_resolver,
+            build_all_deps=build_all_deps,
+        )
 
-        missing = resolver.find_missing_deps([r.name for r in package_info.build_requires])
+        missing = resolver.find_missing_deps(package_info.build_requires)
 
         if missing:
             print(f"\nMissing dependencies ({len(missing)}):")
@@ -574,11 +586,12 @@ def cmd_build(
             build_chain = builder.resolver.get_build_chain()
 
             if build_chain:
-                print(f"\nBuild order ({sum(len(lvl) for lvl in build_chain)} packages):")
+                print(f"\nDependencies to build ({sum(len(lvl) for lvl in build_chain)}):")
                 for level_idx, level in enumerate(build_chain):
                     print(f"  Level {level_idx + 1}: {', '.join(level)}")
+                print(f"Then: {package_info.nvr}")
             else:
-                print("\nNo additional dependencies to build")
+                print("\nNo dependencies to build")
 
         return 0
 
@@ -716,7 +729,16 @@ def main(args: Optional[list[str]] = None) -> int:
             return 1
 
         return cmd_analyze(
-            srpm_path, opts.server, opts.build_tag, opts.cert, opts.serverca, opts.no_ssl_verify
+            srpm_path,
+            opts.server,
+            opts.build_tag,
+            opts.cert,
+            opts.serverca,
+            opts.no_ssl_verify,
+            no_name_resolution=getattr(opts, "no_name_resolution", False),
+            no_ml=getattr(opts, "no_ml", False),
+            ml_model_path=getattr(opts, "ml_model", None),
+            build_all_deps=getattr(opts, "build_all_deps", False),
         )
 
     if opts.download_only:

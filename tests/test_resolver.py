@@ -249,14 +249,40 @@ class TestDependencyResolver:
         assert "missing-dep" in result
         assert "gcc" not in result
 
-    def test_build_dependency_graph_available_package(self, mock_koji_client):
-        mock_koji_client.package_exists.return_value = True
+    def test_build_dependency_graph_root_in_tag_is_still_analyzed(self, mock_koji_client):
+        mock_koji_client.package_exists.side_effect = lambda p, t: p in ("root", "dep1")
         resolver = DependencyResolver(koji_client=mock_koji_client)
 
-        result = resolver.build_dependency_graph("available-pkg", "/path/to/srpm")
+        with patch("vibebuild.resolver.get_build_requires") as mock_get_requires:
+            mock_get_requires.return_value = ["dep1", "dep2"]
+            result = resolver.build_dependency_graph("root", "/path/to/root.src.rpm")
 
-        assert "available-pkg" in result
-        assert result["available-pkg"].is_available is True
+        assert result["root"].is_available is False
+        assert result["root"].dependencies == ["dep2"]
+        assert resolver.get_build_chain() == [["dep2"]]
+
+    def test_build_dependency_graph_available_dependency(self, mock_koji_client):
+        mock_koji_client.package_exists.side_effect = lambda p, t: p == "dep"
+        resolver = DependencyResolver(koji_client=mock_koji_client)
+
+        with patch("vibebuild.resolver.get_build_requires") as mock_get_requires:
+            mock_get_requires.return_value = ["dep"]
+            result = resolver.build_dependency_graph("root", "/path/to/root.src.rpm")
+
+        assert "dep" not in result
+        assert resolver.get_build_chain() == []
+
+    def test_get_build_chain_excludes_root(self, mock_koji_client):
+        mock_koji_client.package_exists.return_value = False
+        resolver = DependencyResolver(koji_client=mock_koji_client)
+
+        with patch("vibebuild.resolver.get_build_requires") as mock_get_requires:
+            mock_get_requires.side_effect = lambda srpm: ["dep"] if "root" in srpm else []
+            resolver.build_dependency_graph(
+                "root", "/path/to/root.src.rpm", srpm_resolver=lambda pkg: f"/path/{pkg}.src.rpm"
+            )
+
+        assert resolver.get_build_chain() == [["dep"]]
 
     def test_build_dependency_graph_missing_package(self, mock_koji_client):
         mock_koji_client.package_exists.return_value = False
@@ -465,13 +491,15 @@ class TestDependencyResolverWithNameResolver:
         """build_dependency_graph should use name_resolver."""
         mock_nr = Mock()
         mock_nr.resolve.side_effect = lambda n: n
+        mock_nr.resolve_srpm_name.return_value = []
         mock_koji_client.package_exists.return_value = True
         resolver = DependencyResolver(koji_client=mock_koji_client, name_resolver=mock_nr)
 
-        result = resolver.build_dependency_graph("pkg", "/path/to/pkg.src.rpm")
+        with patch("vibebuild.resolver.get_build_requires", return_value=["dep"]):
+            result = resolver.build_dependency_graph("pkg", "/path/to/pkg.src.rpm")
 
         assert "pkg" in result
-        mock_nr.resolve.assert_called()
+        mock_nr.resolve.assert_called_with("dep")
 
 
 class TestResolveDeepsException:

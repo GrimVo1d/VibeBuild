@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -329,6 +329,46 @@ BuildRequires: gcc
         assert result == 0
         captured = capsys.readouterr()
         assert "missing-dep" in captured.out
+
+    def test_analyze_uses_build_resolver(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+        requires = [BuildRequirement(name="python3dist(foo)", operator=">=", version="2")]
+
+        with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test", version="1.0", release="1", build_requires=requires, source_urls=[]
+            )
+            with patch("vibebuild.cli.KojiClient"):
+                with patch("vibebuild.cli.create_name_resolver") as mock_nr:
+                    with patch("vibebuild.cli.DependencyResolver") as mock_resolver:
+                        mock_resolver.return_value.find_missing_deps.return_value = []
+                        cmd_analyze(str(srpm), "server", "tag", None, None, build_all_deps=True)
+
+        mock_resolver.assert_called_once_with(
+            koji_client=ANY,
+            koji_tag="tag",
+            name_resolver=mock_nr.return_value,
+            build_all_deps=True,
+        )
+        mock_resolver.return_value.find_missing_deps.assert_called_once_with(requires)
+
+    def test_analyze_no_name_resolution(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            with patch("vibebuild.cli.KojiClient"):
+                with patch("vibebuild.cli.create_name_resolver") as mock_nr:
+                    with patch("vibebuild.cli.DependencyResolver") as mock_resolver:
+                        mock_resolver.return_value.find_missing_deps.return_value = []
+                        cmd_analyze(str(srpm), "server", "tag", None, None, no_name_resolution=True)
+
+        mock_nr.assert_not_called()
+        assert mock_resolver.call_args.kwargs["name_resolver"] is None
 
     def test_analyze_failure(self, tmp_path, capsys):
         srpm = tmp_path / "test.src.rpm"
@@ -768,7 +808,8 @@ class TestCmdBuildEdgeCases:
 
         assert result == 0
         captured = capsys.readouterr()
-        assert "Build order" in captured.out
+        assert "Dependencies to build (2)" in captured.out
+        assert "Then: test-1.0-1" in captured.out
 
     def test_cmd_build_dry_run_srpm_resolver_captured(self, tmp_path, capsys):
         """cmd_build dry_run srpm_resolver should be callable."""

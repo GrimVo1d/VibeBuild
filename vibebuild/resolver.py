@@ -9,7 +9,7 @@ import os
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from vibebuild._retry import with_retry
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
@@ -241,6 +241,7 @@ class DependencyResolver:
         self.build_all_deps = build_all_deps
         self._available_packages: Optional[set[str]] = None
         self._dependency_graph: dict[str, DependencyNode] = {}
+        self._root: Optional[str] = None
         self._has_external_repos: Optional[bool] = None
 
     @property
@@ -333,7 +334,7 @@ class DependencyResolver:
         return False
 
     def find_missing_deps(
-        self, deps: list[str | BuildRequirement], check_provides: bool = True
+        self, deps: Sequence[str | BuildRequirement], check_provides: bool = True
     ) -> list[str]:
         """
         Find dependencies that are not available in Koji tag.
@@ -445,6 +446,9 @@ class DependencyResolver:
         """
         Build complete dependency graph starting from root package.
 
+        The root is always analyzed, even when a build of it is already in the tag:
+        a new version may need dependencies the tagged one did not.
+
         Args:
             root_package: Name of the package to build
             srpm_path: Path to SRPM of root package
@@ -454,19 +458,21 @@ class DependencyResolver:
             Dictionary mapping package names to DependencyNode objects
         """
         self._dependency_graph = {}
+        self._root = root_package
         visited = set()
 
         def resolve_deps(pkg_name: str, pkg_srpm: Optional[str] = None):
             if pkg_name in visited:
                 return
             visited.add(pkg_name)
+            is_root = pkg_name == root_package
 
-            # Normalize the package name using resolver
+            # Normalize dependency names; the root is an SRPM name already
             resolved_name = pkg_name
-            if self.name_resolver:
+            if self.name_resolver and not is_root:
                 resolved_name = self.name_resolver.resolve(pkg_name)
 
-            if self.koji.package_exists(resolved_name, self.koji_tag):
+            if not is_root and self.koji.package_exists(resolved_name, self.koji_tag):
                 self._dependency_graph[resolved_name] = DependencyNode(
                     name=resolved_name, is_available=True
                 )
@@ -500,7 +506,8 @@ class DependencyResolver:
                     for dep, dep_srpm in zip(missing, dep_srpms):
                         resolve_deps(dep, dep_srpm)
 
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Could not analyze %s: %s", resolved_name, exc)
                     node.dependencies = []
 
             self._dependency_graph[resolved_name] = node
@@ -573,9 +580,10 @@ class DependencyResolver:
 
     def get_build_chain(self) -> list[list[str]]:
         """
-        Get packages grouped by build level (parallel builds).
+        Get the dependencies to build, grouped by build level (parallel builds).
 
-        Packages in the same group can be built in parallel.
+        Packages in the same group can be built in parallel. The root package of
+        the graph is not included: callers build it after the chain.
 
         Returns:
             List of lists, each inner list contains packages that can be built together
@@ -605,7 +613,8 @@ class DependencyResolver:
         chains: list[list[str]] = [[] for _ in range(max_level + 1)]
 
         for pkg, level in levels.items():
-            chains[level].append(pkg)
+            if pkg != self._root:
+                chains[level].append(pkg)
 
         return [chain for chain in chains if chain]
 

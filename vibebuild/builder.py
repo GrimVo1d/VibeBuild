@@ -672,9 +672,6 @@ class KojiBuilder:
                 # Submit all packages in this level in parallel
                 level_tasks = []
                 for pkg_name in level:
-                    if pkg_name == package_info.name:
-                        continue
-
                     node = self.resolver._dependency_graph.get(pkg_name)
                     if not node or not node.srpm_path:
                         logger.warning(f"Skipping {pkg_name}: no SRPM available")
@@ -781,7 +778,7 @@ class KojiBuilder:
             if not node.srpm_path:
                 continue
             try:
-                names.extend(get_build_requires(node.srpm_path))
+                names.extend(br.name for br in get_build_requires(node.srpm_path))
             except Exception as exc:
                 logger.debug("get_build_requires(%s) failed: %s", node.srpm_path, exc)
         return detect_toolchains(names)
