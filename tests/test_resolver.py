@@ -682,6 +682,36 @@ class TestGetBuildChainWithAvailableDep:
         assert "pkg-a" in result[0]
 
 
+class TestKojiClientGetTarget:
+    def test_get_target(self, mock_subprocess_run):
+        mock_subprocess_run.return_value.returncode = 0
+        mock_subprocess_run.return_value.stdout = "f44     f44-build     f44-updates-candidate\n"
+        client = KojiClient()
+
+        assert client.get_target("f44") == {
+            "build_tag": "f44-build",
+            "dest_tag": "f44-updates-candidate",
+        }
+        assert "--name=f44" in mock_subprocess_run.call_args[0][0]
+
+    def test_get_target_missing(self, mock_subprocess_run):
+        mock_subprocess_run.return_value.returncode = 2
+        mock_subprocess_run.return_value.stdout = ""
+        mock_subprocess_run.return_value.stderr = "koji: error: No such build target: nope\n"
+        client = KojiClient()
+
+        assert client.get_target("nope") is None
+
+    def test_get_target_koji_error(self, mock_subprocess_run):
+        mock_subprocess_run.return_value.returncode = 1
+        mock_subprocess_run.return_value.stdout = ""
+        mock_subprocess_run.return_value.stderr = "Connection refused"
+        client = KojiClient()
+
+        with pytest.raises(KojiConnectionError):
+            client.get_target("f44")
+
+
 class TestKojiClientHasExternalRepos:
     def test_has_external_repos_true(self, mock_subprocess_run):
         """has_external_repos returns True when external repos are configured."""

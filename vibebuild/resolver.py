@@ -198,6 +198,23 @@ class KojiClient:
             return None
         return {"nvr": nvr, "version": parts[-2], "release": parts[-1]}
 
+    def get_target(self, target: str) -> Optional[dict[str, str]]:
+        """
+        Return the build and destination tags of a build target.
+
+        Returns:
+            {"build_tag": "...", "dest_tag": "..."} or None if the target does not exist.
+        """
+        result = self._run_koji_command("list-targets", f"--name={target}", "--quiet")
+        if result.returncode != 0:
+            if "No such build target" in result.stderr:
+                return None
+            raise KojiConnectionError(f"Failed to get build target {target}: {result.stderr}")
+        parts = result.stdout.split()
+        if len(parts) < 3:
+            return None
+        return {"build_tag": parts[1], "dest_tag": parts[2]}
+
     def has_external_repos(self, tag: str) -> bool:
         """Check if a tag has external repos configured."""
         result = self._run_koji_command("list-external-repos", f"--tag={tag}")

@@ -249,8 +249,8 @@ Examples:
     koji_group.add_argument(
         "--build-tag",
         metavar="TAG",
-        default=koji_cfg.get("build_tag") or "fedora-build",
-        help="Build tag for dependency checking (default: from ~/.koji/config or fedora-build)",
+        default=koji_cfg.get("build_tag"),
+        help="Build tag for dependency checking (default: from ~/.koji/config or the target)",
     )
 
     koji_group.add_argument(
@@ -402,10 +402,20 @@ def print_build_result(result: BuildResult) -> None:
     print("=" * 60)
 
 
+def resolve_target_tags(
+    koji_client: KojiClient, target: str, build_tag: Optional[str] = None
+) -> tuple[str, str]:
+    """Return (build_tag, dest_tag) of a Koji target; an explicit build tag wins."""
+    info = koji_client.get_target(target)
+    if info is None:
+        raise VibeBuildError(f"Build target not found in Koji: {target}")
+    return build_tag or info["build_tag"], info["dest_tag"]
+
+
 def cmd_analyze(
     srpm_path: str,
     server: str,
-    build_tag: str,
+    build_tag: Optional[str],
     cert: Optional[str],
     serverca: Optional[str],
     no_ssl_verify: bool = False,
@@ -413,6 +423,7 @@ def cmd_analyze(
     no_ml: bool = False,
     ml_model_path: Optional[str] = None,
     build_all_deps: bool = False,
+    target: Optional[str] = None,
 ) -> int:
     """Analyze SRPM dependencies the same way a build would, without downloading or building."""
     print(f"Analyzing: {srpm_path}")
@@ -433,6 +444,11 @@ def cmd_analyze(
         koji_client = KojiClient(
             server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
         )
+        if not build_tag:
+            if not target:
+                raise VibeBuildError("No build tag: pass --build-tag or a target")
+            build_tag, _ = resolve_target_tags(koji_client, target)
+        print(f"Build tag: {build_tag}")
         name_resolver = None
         if not no_name_resolution:
             name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
@@ -524,7 +540,7 @@ def cmd_build(
     web_url: str,
     cert: Optional[str],
     serverca: Optional[str],
-    build_tag: str,
+    build_tag: Optional[str],
     scratch: bool,
     nowait: bool,
     no_deps: bool,
@@ -545,6 +561,15 @@ def cmd_build(
         logging.error(f"SRPM not found: {srpm_path}")
         return 1
 
+    try:
+        koji_client = KojiClient(
+            server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
+        )
+        build_tag, dest_tag = resolve_target_tags(koji_client, target, build_tag)
+    except VibeBuildError as e:
+        logging.error(str(e))
+        return 1
+
     builder = KojiBuilder(
         koji_server=server,
         koji_web_url=web_url,
@@ -563,6 +588,7 @@ def cmd_build(
         force=force,
         idempotent=not no_idempotency,
         build_all_deps=build_all_deps,
+        dest_tag=dest_tag,
     )
 
     if dry_run:
@@ -711,6 +737,13 @@ def main(args: Optional[list[str]] = None) -> int:
         srpm_arg = opts.srpm or opts.target
         if not srpm_arg:
             parser.error("--analyze-only requires SRPM path or package name")
+        # vibebuild --analyze-only [TARGET] SRPM: the target only gives the build tag
+        analyze_target = opts.target if opts.srpm else load_koji_config().get("target")
+        if not opts.build_tag and not analyze_target:
+            parser.error(
+                "--analyze-only needs a build tag: pass --build-tag, a target "
+                "(vibebuild --analyze-only TARGET SRPM) or 'target' in ~/.koji/config"
+            )
 
         # Determine fedora_release for potential download
         analyze_release = getattr(opts, "fedora_release", None) or "rawhide"
@@ -739,6 +772,7 @@ def main(args: Optional[list[str]] = None) -> int:
             no_ml=getattr(opts, "no_ml", False),
             ml_model_path=getattr(opts, "ml_model", None),
             build_all_deps=getattr(opts, "build_all_deps", False),
+            target=analyze_target,
         )
 
     if opts.download_only:

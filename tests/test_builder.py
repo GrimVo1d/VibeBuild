@@ -934,6 +934,24 @@ class TestBuildPackageAddPkg:
         method_names = [name for name, _, _ in mock_koji_session.method_calls]
         assert method_names.index("packageListAdd") < method_names.index("build")
 
+    def test_packageListAdd_uses_dest_tag(self, tmp_path, mock_koji_session):
+        """The package goes to the target's destination tag, the build to the target."""
+        srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
+        srpm.write_text("fake srpm")
+        mock_koji_session.build.return_value = 12345
+        builder = KojiBuilder(target="f44", dest_tag="f44-updates-candidate")
+
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            builder.build_package(str(srpm), wait=False)
+
+        mock_koji_session.packageListAdd.assert_called_once_with(
+            "f44-updates-candidate", "test-pkg", owner="kojiadmin"
+        )
+        assert mock_koji_session.build.call_args[0][1] == "f44"
+
     def test_packageListAdd_already_exists_ignored(self, tmp_path, mock_koji_session):
         """`already exists` from packageListAdd must be silently ignored."""
         srpm = tmp_path / "test-pkg-1.0-1.src.rpm"

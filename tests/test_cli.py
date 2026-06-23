@@ -23,6 +23,26 @@ from vibebuild.cli import (
 )
 from vibebuild.exceptions import VibeBuildError
 
+NO_KOJI_CONFIG = {
+    "server": None,
+    "web_url": None,
+    "cert": None,
+    "serverca": None,
+    "target": None,
+    "build_tag": None,
+}
+
+
+@pytest.fixture(autouse=True)
+def koji_client():
+    """cmd_build and cmd_analyze look the target up in Koji: answer like a real target."""
+    with patch("vibebuild.cli.KojiClient") as client:
+        client.return_value.get_target.return_value = {
+            "build_tag": "target-build",
+            "dest_tag": "target-dest",
+        }
+        yield client
+
 
 class TestCreateParser:
     def test_parser_created(self):
@@ -145,7 +165,7 @@ class TestCreateParser:
 
         args = parser.parse_args(["target", "pkg.src.rpm"])
 
-        assert args.build_tag == "fedora-build"
+        assert args.build_tag is None
 
     def test_parser_download_dir_option(self):
         parser = create_parser()
@@ -370,6 +390,35 @@ BuildRequires: gcc
         mock_nr.assert_not_called()
         assert mock_resolver.call_args.kwargs["name_resolver"] is None
 
+    def test_analyze_build_tag_from_target(self, tmp_path, capsys, koji_client):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            with patch("vibebuild.cli.DependencyResolver") as mock_resolver:
+                mock_resolver.return_value.find_missing_deps.return_value = []
+                result = cmd_analyze(str(srpm), "server", None, None, None, target="f44")
+
+        assert result == 0
+        koji_client.return_value.get_target.assert_called_once_with("f44")
+        assert mock_resolver.call_args.kwargs["koji_tag"] == "target-build"
+        assert "Build tag: target-build" in capsys.readouterr().out
+
+    def test_analyze_without_build_tag_or_target(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            result = cmd_analyze(str(srpm), "server", None, None, None)
+
+        assert result == 1
+
     def test_analyze_failure(self, tmp_path, capsys):
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
@@ -400,6 +449,59 @@ class TestCmdDownload:
 
 
 class TestCmdBuild:
+    def _build(self, srpm, build_tag):
+        return cmd_build(
+            target="target",
+            srpm_path=str(srpm),
+            server="server",
+            web_url="web",
+            cert=None,
+            serverca=None,
+            build_tag=build_tag,
+            scratch=False,
+            nowait=False,
+            no_deps=False,
+            download_dir=None,
+            dry_run=True,
+        )
+
+    def test_build_tags_from_target(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.KojiBuilder") as mock_builder:
+            with patch("vibebuild.cli.get_package_info_from_srpm"):
+                mock_builder.return_value.resolver.get_build_chain.return_value = []
+                self._build(srpm, build_tag=None)
+
+        kwargs = mock_builder.call_args.kwargs
+        assert kwargs["build_tag"] == "target-build"
+        assert kwargs["dest_tag"] == "target-dest"
+
+    def test_build_explicit_build_tag_wins(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.KojiBuilder") as mock_builder:
+            with patch("vibebuild.cli.get_package_info_from_srpm"):
+                mock_builder.return_value.resolver.get_build_chain.return_value = []
+                self._build(srpm, build_tag="my-build")
+
+        kwargs = mock_builder.call_args.kwargs
+        assert kwargs["build_tag"] == "my-build"
+        assert kwargs["dest_tag"] == "target-dest"
+
+    def test_build_unknown_target(self, tmp_path, koji_client):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+        koji_client.return_value.get_target.return_value = None
+
+        with patch("vibebuild.cli.KojiBuilder") as mock_builder:
+            result = self._build(srpm, build_tag=None)
+
+        assert result == 1
+        mock_builder.assert_not_called()
+
     def test_build_file_not_found(self):
         result = cmd_build(
             target="target",
@@ -538,12 +640,35 @@ class TestMain:
         srpm = tmp_path / "test.src.rpm"
         srpm.write_text("fake srpm")
 
-        with patch("vibebuild.cli.cmd_analyze") as mock_cmd:
-            mock_cmd.return_value = 0
-            result = main(["--analyze-only", str(srpm)])
+        with patch("vibebuild.cli.load_koji_config", return_value=NO_KOJI_CONFIG):
+            with patch("vibebuild.cli.cmd_analyze") as mock_cmd:
+                mock_cmd.return_value = 0
+                result = main(["--analyze-only", "--build-tag", "f44-build", str(srpm)])
 
         assert result == 0
-        mock_cmd.assert_called_once()
+        assert mock_cmd.call_args.args[2] == "f44-build"
+
+    def test_main_analyze_only_with_target(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.load_koji_config", return_value=NO_KOJI_CONFIG):
+            with patch("vibebuild.cli.cmd_analyze") as mock_cmd:
+                mock_cmd.return_value = 0
+                main(["--analyze-only", "f44", str(srpm)])
+
+        assert mock_cmd.call_args.args[0] == str(srpm.resolve())
+        assert mock_cmd.call_args.kwargs["target"] == "f44"
+
+    def test_main_analyze_only_without_build_tag_or_target(self, tmp_path):
+        srpm = tmp_path / "test.src.rpm"
+        srpm.write_text("fake srpm")
+
+        with patch("vibebuild.cli.load_koji_config", return_value=NO_KOJI_CONFIG):
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--analyze-only", str(srpm)])
+
+        assert exc_info.value.code == 2
 
     def test_main_download_only(self):
         with patch("vibebuild.cli.cmd_download") as mock_cmd:

@@ -112,12 +112,14 @@ class KojiBuilder:
         force: bool = False,
         idempotent: bool = False,
         build_all_deps: bool = False,
+        dest_tag: Optional[str] = None,
     ):
         self.koji_server = koji_server
         self.koji_web_url = koji_web_url
         self.cert = cert
         self.serverca = serverca
         self.target = target
+        self.dest_tag = dest_tag or target  # tag the target's builds land in
         self.build_tag = build_tag
         self.scratch = scratch
         self.nowait = nowait
@@ -263,12 +265,12 @@ class KojiBuilder:
             and not self.scratch
         ):
             try:
-                latest = self.koji_client.latest_build(package_info.name, self.target)
+                latest = self.koji_client.latest_build(package_info.name, self.dest_tag)
                 if latest and latest.get("nvr") == package_info.nvr:
                     logger.info(
                         "  %s already built in %s (NVR=%s), skipping",
                         package_info.name,
-                        self.target,
+                        self.dest_tag,
                         latest["nvr"],
                     )
                     task.status = BuildStatus.ALREADY_BUILT
@@ -276,11 +278,10 @@ class KojiBuilder:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("idempotency check skipped: %s", exc)
 
-        dest_tag = self.target  # e.g. "f42"
         logger.info(f"Starting build: {package_info.nvr}")
 
         try:
-            task.task_id = self._submit_via_session(srpm_path, package_info.name, dest_tag)
+            task.task_id = self._submit_via_session(srpm_path, package_info.name, self.dest_tag)
         except KojiBuildError:
             task.status = BuildStatus.FAILED
             raise
@@ -786,13 +787,13 @@ class KojiBuilder:
     def _populate_tagged_builds(self, result: BuildResult, target_name: str) -> None:
         """Query koji list-tagged --latest <dest-tag> and split target vs deps."""
         try:
-            tagged = self.koji_client.list_tagged_builds(self.target)
+            tagged = self.koji_client.list_tagged_builds(self.dest_tag)
         except Exception as exc:
-            logger.warning("list-tagged for %s failed: %s", self.target, exc)
+            logger.warning("list-tagged for %s failed: %s", self.dest_tag, exc)
             return
         result.tagged_target = tagged.get(target_name)
         if target_name in result.built_packages and not result.tagged_target:
-            logger.warning("target %s built, but not found in tag %s", target_name, self.target)
+            logger.warning("target %s built, but not found in tag %s", target_name, self.dest_tag)
         for pkg in result.built_packages:
             if pkg == target_name:
                 continue
@@ -800,7 +801,7 @@ class KojiBuilder:
             if nvr:
                 result.tagged_deps.append(nvr)
             else:
-                logger.warning("dep %s built, but not found in tag %s", pkg, self.target)
+                logger.warning("dep %s built, but not found in tag %s", pkg, self.dest_tag)
 
     def build_chain(self, packages: list[tuple[str, str]]) -> BuildResult:
         """
