@@ -169,14 +169,14 @@ class TestPackageNameResolverSRPMNames:
 
         result = resolver.resolve_srpm_name("python3-requests")
 
-        assert result == ["python-requests", "python3-requests"]
+        assert result == ["python-requests", "requests", "python3-requests"]
 
     def test_resolve_srpm_name_python2(self):
         resolver = PackageNameResolver()
 
         result = resolver.resolve_srpm_name("python2-six")
 
-        assert result == ["python-six", "python2-six"]
+        assert result == ["python-six", "six", "python2-six"]
 
     def test_resolve_srpm_name_python_prefix_fallback(self):
         # Many Fedora SRPMs drop the python- prefix (pyyaml, pytest, trustme).
@@ -185,11 +185,20 @@ class TestPackageNameResolverSRPMNames:
 
         assert resolver.resolve_srpm_name("python-pyyaml") == ["python-pyyaml", "pyyaml"]
         assert resolver.resolve_srpm_name("python-pytest") == ["python-pytest", "pytest"]
-        # The python3- rule above must keep its existing order (regression guard).
-        assert resolver.resolve_srpm_name("python3-requests") == [
-            "python-requests",
-            "python3-requests",
+        # python3-X also tries the bare name: the pytest SRPM builds python3-pytest.
+        assert resolver.resolve_srpm_name("python3-pytest") == [
+            "python-pytest",
+            "pytest",
+            "python3-pytest",
         ]
+
+    def test_resolve_srpm_name_python_core_not_guessed(self):
+        """python3-devel comes from python3.NN, which depends on the release: no guess."""
+        resolver = PackageNameResolver()
+
+        assert resolver.resolve_srpm_name("python3-devel") == ["python3-devel"]
+        assert resolver.resolve_srpm_name("python3") == ["python3"]
+        assert resolver.get_download_candidates("python3-devel") == ["python3-devel"]
 
     def test_resolve_srpm_name_devel(self):
         resolver = PackageNameResolver()

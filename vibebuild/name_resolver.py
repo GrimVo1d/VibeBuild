@@ -190,12 +190,6 @@ SUBPACKAGE_TO_SRPM: dict[str, str] = {
     "perl-warnings": "perl",
     # ---- perl-List-Util -> perl-Scalar-List-Utils ----
     "perl-List-Util": "perl-Scalar-List-Utils",
-    # ---- python3 subpackages -> python3.NN ----
-    "python3-libs": "python3.13",
-    "python3-devel": "python3.13",
-    "python3-idle": "python3.13",
-    "python3-tkinter": "python3.13",
-    "python3-test": "python3.13",
     # ---- gcc subpackages ----
     "gcc-c++": "gcc",
     "gcc-gfortran": "gcc",
@@ -304,8 +298,6 @@ SUBPACKAGE_TO_SRPM: dict[str, str] = {
     # ---- rust-bindgen ----
     "bindgen": "rust-bindgen-cli",
     "bindgen-cli": "rust-bindgen-cli",
-    # ---- python3 -> python3.NN ----
-    "python3": "python3.13",
     # ---- emacs subpackages ----
     "emacs-common": "emacs",
     "emacs-nox": "emacs",
@@ -375,6 +367,12 @@ SUBPACKAGE_TO_SRPM: dict[str, str] = {
     # ---- libcap subpackages ----
     "libcap-devel": "libcap",
 }
+
+# Built from the python3.NN SRPM, where NN depends on the Fedora release
+# (f44: python3.14, rawhide: python3.15). Not guessed: only the name itself is tried.
+PYTHON_CORE_PACKAGES = frozenset(
+    {"python3", "python3-libs", "python3-devel", "python3-idle", "python3-tkinter", "python3-test"}
+)
 
 # Macro pattern for matching %{macro_name} or %{?macro_name}
 _MACRO_PATTERN = re.compile(r"%\{([^}]+)\}")
@@ -553,24 +551,24 @@ class PackageNameResolver:
         """
         candidates = []
 
+        if rpm_name in PYTHON_CORE_PACKAGES:
+            candidates.append(rpm_name)
+
         # Check known subpackage-to-SRPM mapping first
-        if rpm_name in SUBPACKAGE_TO_SRPM:
+        elif rpm_name in SUBPACKAGE_TO_SRPM:
             srpm = SUBPACKAGE_TO_SRPM[rpm_name]
             candidates.append(srpm)
             # Also keep original name as fallback
             if rpm_name != srpm:
                 candidates.append(rpm_name)
 
-        # Rule: python3-X -> try python-X first, then python3-X
-        elif rpm_name.startswith("python3-"):
+        # Rule: python3-X / python2-X -> python-X, then X (pytest, trustme, and
+        # bindings built from their library: python3-rpm -> rpm), then the name itself
+        elif rpm_name.startswith(("python3-", "python2-")):
             base = rpm_name[len("python3-") :]
             candidates.append(f"python-{base}")
-            candidates.append(rpm_name)
-
-        # Rule: python2-X -> try python-X first
-        elif rpm_name.startswith("python2-"):
-            base = rpm_name[len("python2-") :]
-            candidates.append(f"python-{base}")
+            if base:
+                candidates.append(base)
             candidates.append(rpm_name)
 
         # Rule: python-X (SRPM-style, no version digit) -> try python-X first,
@@ -653,7 +651,7 @@ class PackageNameResolver:
         """
         Return a list of package names to try when downloading an SRPM.
 
-        Used for both aliases (e.g. python3 -> python3.12) and virtual provides.
+        Used for both aliases (e.g. glib2-devel -> glib2) and virtual provides.
         Order: ML prediction (srpm_name, rpm_name), rule-based resolve,
         resolve_srpm_name variants, then name.
 
