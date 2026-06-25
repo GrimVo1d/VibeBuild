@@ -148,7 +148,7 @@ class _HelpAllArgumentParser(argparse.ArgumentParser):
             "Common options:\n"
             "  -v, --verbose      Enable verbose output\n"
             "  -q, --quiet        Suppress non-error output\n"
-            "  --scratch          Perform scratch build (not tagged)\n"
+            "  --scratch          Scratch-build the target (not tagged)\n"
             "  --no-deps          Skip dependency resolution, just build the package\n"
             "  --server URL       Koji hub URL (default: from ~/.koji/config or Fedora Koji)\n\n"
             "Full list of options: vibebuild --help-all\n"
@@ -262,7 +262,9 @@ Examples:
     build_group = parser.add_argument_group("Build options")
 
     build_group.add_argument(
-        "--scratch", action="store_true", help="Perform scratch build (not tagged)"
+        "--scratch",
+        action="store_true",
+        help="Scratch-build the target (not tagged); dependencies are still regular builds",
     )
 
     build_group.add_argument(

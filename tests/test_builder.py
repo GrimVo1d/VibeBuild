@@ -1083,7 +1083,7 @@ class TestUnpackagedFilesRetry:
         )
         submit_calls: list[bool] = []
 
-        def fake_submit(path, add_unpackaged_macro=False):
+        def fake_submit(path, add_unpackaged_macro=False, scratch=False):
             submit_calls.append(add_unpackaged_macro)
             return first if len(submit_calls) == 1 else retry
 
@@ -1158,3 +1158,156 @@ class TestUnpackagedFilesRetry:
         mock_submit.assert_not_called()
         assert failed_task.task_id == 42
         assert failed_task.status == BuildStatus.FAILED
+
+
+class TestRepoFreshness:
+    def test_repo_current(self, mock_koji_session):
+        mock_koji_session.getRepo.return_value = {"id": 1, "create_event": 100}
+        mock_koji_session.getTag.return_value = {"id": 7}
+        mock_koji_session.getFullInheritance.return_value = [{"parent_id": 3}]
+        mock_koji_session.tagChangedSinceEvent.return_value = False
+        builder = KojiBuilder()
+
+        assert builder._repo_is_current() is True
+        mock_koji_session.tagChangedSinceEvent.assert_called_once_with(100, [7, 3])
+
+    def test_repo_changed_since(self, mock_koji_session):
+        mock_koji_session.getRepo.return_value = {"id": 1, "create_event": 100}
+        mock_koji_session.getTag.return_value = {"id": 7}
+        mock_koji_session.getFullInheritance.return_value = []
+        mock_koji_session.tagChangedSinceEvent.return_value = True
+        builder = KojiBuilder()
+
+        assert builder._repo_is_current() is False
+
+    def test_no_repo(self, mock_koji_session):
+        mock_koji_session.getRepo.return_value = None
+        builder = KojiBuilder()
+
+        assert builder._repo_is_current() is False
+
+    def test_check_error_means_not_current(self, mock_koji_session):
+        mock_koji_session.getRepo.side_effect = koji.GenericError("boom")
+        builder = KojiBuilder()
+
+        assert builder._repo_is_current() is False
+
+    def test_ensure_repo_ready_skips_newrepo_when_current(self, mock_koji_session):
+        builder = KojiBuilder()
+
+        with patch.object(builder, "_repo_is_current", return_value=True):
+            builder._ensure_repo_ready()
+
+        mock_koji_session.newRepo.assert_not_called()
+
+    def test_ensure_repo_ready_regenerates_stale_repo(self, mock_koji_session):
+        builder = KojiBuilder()
+
+        with patch.object(builder, "_repo_is_current", return_value=False):
+            builder._ensure_repo_ready()
+
+        mock_koji_session.newRepo.assert_called_once_with("fedora-build")
+
+
+class TestRepoRegenerationBetweenLevels:
+    def _run(self, tmp_path, chain, built):
+        """Run build_with_deps over `chain`; packages in `built` complete, the rest fail."""
+        from vibebuild.resolver import DependencyNode
+
+        srpm = tmp_path / "main.src.rpm"
+        srpm.write_text("fake srpm")
+        builder = KojiBuilder()
+        builder.resolver._dependency_graph = {
+            name: DependencyNode(name=name, srpm_path=str(srpm))
+            for level in chain
+            for name in level
+        }
+
+        def submit(path, **kwargs):
+            name = next(n for lvl in chain for n in lvl if n not in submitted)
+            submitted.append(name)
+            return BuildTask(package_name=name, srpm_path=path, target="t", task_id=1)
+
+        def poll(tasks, **kwargs):
+            for t in tasks:
+                t.status = BuildStatus.COMPLETE if t.package_name in built else BuildStatus.FAILED
+
+        submitted: list[str] = []
+        target = BuildTask(
+            package_name="main", srpm_path=str(srpm), target="t", status=BuildStatus.COMPLETE
+        )
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="main", version="1", release="1", build_requires=[], source_urls=[]
+            )
+            with (
+                patch.object(builder.resolver, "build_dependency_graph"),
+                patch.object(builder.resolver, "get_build_chain", return_value=chain),
+                patch.object(builder, "_ensure_repo_ready"),
+                patch.object(builder, "_submit_build", side_effect=submit),
+                patch.object(builder, "_poll_builds", side_effect=poll),
+                patch.object(builder, "_retry_unpackaged_failures"),
+                patch.object(builder, "build_package", return_value=target),
+                patch.object(builder, "wait_for_repo") as wait,
+            ):
+                builder.build_with_deps(str(srpm))
+        return wait.call_count
+
+    def test_one_level_one_newrepo(self, tmp_path):
+        assert self._run(tmp_path, [["dep"]], built={"dep"}) == 1
+
+    def test_two_levels_newrepo_between_and_before_target(self, tmp_path):
+        assert self._run(tmp_path, [["a"], ["b"]], built={"a", "b"}) == 2
+
+    def test_nothing_built_no_newrepo(self, tmp_path):
+        assert self._run(tmp_path, [["dep"]], built=set()) == 0
+
+    def test_no_dependencies_no_newrepo(self, tmp_path):
+        assert self._run(tmp_path, [], built=set()) == 0
+
+
+class TestScratchOnlyForTarget:
+    def test_target_scratch_option(self, tmp_path, mock_koji_session):
+        srpm = tmp_path / "test-pkg-1.0-1.src.rpm"
+        srpm.write_text("fake srpm")
+        builder = KojiBuilder(target="f44", scratch=True)
+
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            builder.build_package(str(srpm), wait=False)
+
+        assert mock_koji_session.build.call_args[0][2] == {"scratch": True}
+
+    def test_dependency_is_regular_build(self, tmp_path, mock_koji_session):
+        srpm = tmp_path / "dep-1.0-1.src.rpm"
+        srpm.write_text("fake srpm")
+        builder = KojiBuilder(target="f44", scratch=True)
+
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="dep", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            builder._submit_build(str(srpm))
+
+        assert mock_koji_session.build.call_args[0][2] == {}
+
+    def test_scratch_target_not_reported_missing_from_tag(self, caplog):
+        builder = KojiBuilder(scratch=True)
+        result = BuildResult(success=True, built_packages=["main"])
+
+        with patch.object(builder.koji_client, "list_tagged_builds", return_value={}):
+            builder._populate_tagged_builds(result, "main")
+
+        assert "not found in tag" not in caplog.text
+        assert result.tagged_target is None
+
+
+class TestTaskStateName:
+    def test_free_state(self):
+        assert KojiBuilder._state_name(0) == "free"
+
+    def test_missing_state(self):
+        assert KojiBuilder._state_name(None) == "unknown"
+        assert KojiBuilder._state_name(42) == "unknown"

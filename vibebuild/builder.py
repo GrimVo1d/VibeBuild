@@ -208,7 +208,9 @@ class KojiBuilder:
             self._open_session()
         return self._session  # type: ignore[return-value]
 
-    def _submit_build(self, srpm_path: str, add_unpackaged_macro: bool = False) -> BuildTask:
+    def _submit_build(
+        self, srpm_path: str, add_unpackaged_macro: bool = False, scratch: bool = False
+    ) -> BuildTask:
         """
         Submit a single package build to Koji (no waiting).
 
@@ -219,6 +221,8 @@ class KojiBuilder:
             srpm_path: Path to SRPM file
             add_unpackaged_macro: inject `_unpackaged_files_terminate_build 0`.
                 Only on retry; on the first attempt always False.
+            scratch: submit a scratch build (never tagged). Only for the target:
+                dependencies have to land in the tag for the target to use them.
 
         Returns:
             BuildTask with task_id and status BUILDING
@@ -259,11 +263,7 @@ class KojiBuilder:
         # do not submit again, return ALREADY_BUILT. Enabled via
         # `idempotent=True` in __init__ (the CLI sets it by default).
         # The skip is disabled via self.force.
-        if (
-            getattr(self, "idempotent", False)
-            and not getattr(self, "force", False)
-            and not self.scratch
-        ):
+        if getattr(self, "idempotent", False) and not getattr(self, "force", False) and not scratch:
             try:
                 latest = self.koji_client.latest_build(package_info.name, self.dest_tag)
                 if latest and latest.get("nvr") == package_info.nvr:
@@ -281,7 +281,9 @@ class KojiBuilder:
         logger.info(f"Starting build: {package_info.nvr}")
 
         try:
-            task.task_id = self._submit_via_session(srpm_path, package_info.name, self.dest_tag)
+            task.task_id = self._submit_via_session(
+                srpm_path, package_info.name, self.dest_tag, scratch
+            )
         except KojiBuildError:
             task.status = BuildStatus.FAILED
             raise
@@ -295,7 +297,9 @@ class KojiBuilder:
 
         return task
 
-    def _submit_via_session(self, srpm_path: Path, package_name: str, dest_tag: str) -> int:
+    def _submit_via_session(
+        self, srpm_path: Path, package_name: str, dest_tag: str, scratch: bool = False
+    ) -> int:
         """Through the persistent session do add-pkg + uploadWrapper + build atomically.
 
         Takes the current `self._session` (opens a new one if there is none). Does
@@ -312,7 +316,7 @@ class KojiBuilder:
         session.uploadWrapper(str(srpm_path), server_dir)
         server_srpm = f"{server_dir}/{srpm_path.name}"
 
-        build_opts: dict = {"scratch": True} if self.scratch else {}
+        build_opts: dict = {"scratch": True} if scratch else {}
         try:
             task_id = session.build(server_srpm, self.target, build_opts)
         except koji.GenericError as exc:
@@ -347,7 +351,7 @@ class KojiBuilder:
         if own_session:
             self._open_session()
         try:
-            task = self._submit_build(srpm_path)
+            task = self._submit_build(srpm_path, scratch=self.scratch)
 
             if not (wait and not self.nowait and task.task_id):
                 if wait and not self.nowait:
@@ -362,7 +366,9 @@ class KojiBuilder:
                     "  retrying %s with _unpackaged_files_terminate_build 0",
                     task.package_name,
                 )
-                retry_task = self._submit_build(srpm_path, add_unpackaged_macro=True)
+                retry_task = self._submit_build(
+                    srpm_path, add_unpackaged_macro=True, scratch=self.scratch
+                )
                 if retry_task.task_id:
                     retry_task.status = self._poll_build(
                         retry_task.task_id, retry_task.nvr or retry_task.package_name
@@ -441,7 +447,9 @@ class KojiBuilder:
 
     @classmethod
     def _state_name(cls, state_int: Optional[int]) -> str:
-        return cls._KOJI_TASK_STATES.get(state_int or -1, "unknown")
+        if state_int is None:
+            return "unknown"
+        return cls._KOJI_TASK_STATES.get(state_int, "unknown")
 
     def _poll_build(
         self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30
@@ -538,8 +546,25 @@ class KojiBuilder:
             task.error_message = f"Build timed out after {timeout}s"
             logger.error(f"  [{task.package_name}] Build timed out after {timeout}s")
 
+    def _repo_is_current(self) -> bool:
+        """True if the build tag has a ready repo and nothing it inherits changed since."""
+        session = self._get_session()
+        try:
+            repo = session.getRepo(self.build_tag)
+            if not repo:
+                return False
+            tag_ids = [session.getTag(self.build_tag, strict=True)["id"]]
+            tag_ids += [link["parent_id"] for link in session.getFullInheritance(self.build_tag)]
+            return not session.tagChangedSinceEvent(repo["create_event"], tag_ids)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("repo freshness check for %s failed: %s", self.build_tag, exc)
+            return False
+
     def _ensure_repo_ready(self) -> None:
-        """Trigger newRepo on the build tag and wait for the task to finish."""
+        """Regenerate the build tag repo unless it is already current, and wait for it."""
+        if self._repo_is_current():
+            logger.info(f"Repo for {self.build_tag} is current")
+            return
         session = self._get_session()
         try:
             task_id = session.newRepo(self.build_tag)
@@ -660,14 +685,22 @@ class KojiBuilder:
         )
 
         build_chain = self.resolver.get_build_chain()
+        # Set when something was tagged since the last newRepo: the next level (or
+        # the target) needs a fresh repo to see it.
+        repo_stale = False
 
         if not build_chain:
             logger.info("No dependencies to build, proceeding with target package")
         else:
             total_deps = sum(len(level) for level in build_chain)
             logger.info(f"Found {total_deps} packages to build in {len(build_chain)} levels")
+            if self.scratch:
+                logger.info("Dependencies are regular builds: scratch builds are never tagged")
 
             for level_idx, level in enumerate(build_chain):
+                if repo_stale:
+                    self.wait_for_repo()
+                    repo_stale = False
                 logger.info(f"Building level {level_idx + 1}/{len(build_chain)}: {level}")
 
                 # Submit all packages in this level in parallel
@@ -691,21 +724,15 @@ class KojiBuilder:
                     self._poll_builds(level_tasks)
                     self._retry_unpackaged_failures(level_tasks)
 
-                    level_built = 0
                     for task in level_tasks:
                         if task.status == BuildStatus.COMPLETE:
                             result.built_packages.append(task.package_name)
-                            level_built += 1
+                            repo_stale = True
                         else:
                             result.failed_packages.append(task.package_name)
                             result.success = False
 
-                    # Wait for repo between levels (not after last level)
-                    if level_built > 0 and level_idx < len(build_chain) - 1:
-                        self.wait_for_repo()
-
-        # Wait for repo once before target if any deps were built
-        if result.built_packages:
+        if repo_stale:
             self.wait_for_repo()
 
         if result.success or not result.failed_packages:
@@ -791,8 +818,8 @@ class KojiBuilder:
         except Exception as exc:
             logger.warning("list-tagged for %s failed: %s", self.dest_tag, exc)
             return
-        result.tagged_target = tagged.get(target_name)
-        if target_name in result.built_packages and not result.tagged_target:
+        result.tagged_target = None if self.scratch else tagged.get(target_name)
+        if target_name in result.built_packages and not result.tagged_target and not self.scratch:
             logger.warning("target %s built, but not found in tag %s", target_name, self.dest_tag)
         for pkg in result.built_packages:
             if pkg == target_name:
