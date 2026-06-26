@@ -1,10 +1,8 @@
 """
 Decorator with exponential delay for transient errors.
 
-Used in hot paths where the network/Koji may blink:
-- koji CLI subprocess (resolver.KojiClient._run_koji_command)
-- HTTP downloads of SRPMs (fetcher)
-- submit commands (builder._run_koji)
+Used for HTTP downloads of SRPMs (fetcher), where the network may blink.
+Koji XML-RPC calls are retried by koji.ClientSession itself.
 
 IMPORTANT: retry must NOT hide programming bugs: we retry only on
 exceptions/signals matched by the `transient_marker` function.

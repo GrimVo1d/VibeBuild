@@ -1,7 +1,8 @@
 """Tests for vibebuild.resolver module."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
+import koji
 import pytest
 
 from vibebuild.analyzer import BuildRequirement
@@ -14,6 +15,174 @@ from vibebuild.resolver import (
     DependencyResolver,
     KojiClient,
 )
+
+
+def _build(name, version, release):
+    return {
+        "package_name": name,
+        "nvr": f"{name}-{version}-{release}",
+        "version": version,
+        "release": release,
+    }
+
+
+@pytest.fixture
+def hub(mocker):
+    """The koji.ClientSession behind KojiClient."""
+    session = MagicMock()
+    mocker.patch("vibebuild.resolver.koji.ClientSession", return_value=session)
+    return session
+
+
+class TestKojiClient:
+    def test_default_server(self):
+        client = KojiClient()
+
+        assert client.server == "https://koji.fedoraproject.org/kojihub"
+        assert client.web_url == "https://koji.fedoraproject.org/koji"
+
+    def test_session_verifies_with_serverca(self, mocker):
+        cls = mocker.patch("vibebuild.resolver.koji.ClientSession")
+        KojiClient(server="https://hub/kojihub", serverca="/ca.crt").session
+
+        assert cls.call_args.args[0] == "https://hub/kojihub"
+        assert cls.call_args.kwargs["opts"]["serverca"] == "/ca.crt"
+        assert "no_ssl_verify" not in cls.call_args.kwargs["opts"]
+
+    def test_session_no_ssl_verify(self, mocker):
+        cls = mocker.patch("vibebuild.resolver.koji.ClientSession")
+        KojiClient(serverca="/ca.crt", no_ssl_verify=True).session
+
+        assert cls.call_args.kwargs["opts"]["no_ssl_verify"] is True
+        assert "serverca" not in cls.call_args.kwargs["opts"]
+
+    def test_session_created_once(self, mocker):
+        cls = mocker.patch("vibebuild.resolver.koji.ClientSession")
+        client = KojiClient()
+
+        assert client.session is client.session
+        cls.assert_called_once()
+
+    def test_list_packages(self, hub):
+        hub.listPackages.return_value = [{"package_name": "gcc"}, {"package_name": "make"}]
+
+        assert KojiClient().list_packages("f44") == ["gcc", "make"]
+        hub.listPackages.assert_called_once_with(tagID="f44", inherited=True, with_blocked=False)
+
+    def test_list_tagged_builds(self, hub):
+        hub.listTagged.return_value = [_build("gcc", "15.1", "1.fc44")]
+
+        assert KojiClient().list_tagged_builds("f44") == {"gcc": "gcc-15.1-1.fc44"}
+        hub.listTagged.assert_called_once_with("f44", latest=True)
+
+    def test_transport_error_becomes_connection_error(self, hub):
+        hub.listPackages.side_effect = OSError("Connection refused")
+
+        with pytest.raises(KojiConnectionError, match="listPackages"):
+            KojiClient().list_packages("f44")
+
+    def test_latest_build(self, hub):
+        hub.getLatestBuilds.return_value = [_build("gcc", "15.1", "1.fc44")]
+
+        assert KojiClient().latest_build("gcc", "f44") == {
+            "nvr": "gcc-15.1-1.fc44",
+            "version": "15.1",
+            "release": "1.fc44",
+        }
+        hub.getLatestBuilds.assert_called_once_with("f44", package="gcc")
+
+    def test_latest_build_none(self, hub):
+        hub.getLatestBuilds.return_value = []
+
+        assert KojiClient().latest_build("gcc", "f44") is None
+
+    def test_latest_build_unknown_package(self, hub):
+        hub.getLatestBuilds.side_effect = koji.GenericError("No such entry in table package")
+
+        assert KojiClient().latest_build("nope", "f44") is None
+
+    def test_latest_build_cached(self, hub):
+        hub.getLatestBuilds.return_value = []
+        client = KojiClient()
+
+        client.latest_build("gcc", "f44")
+        client.latest_build("gcc", "f44")
+        assert hub.getLatestBuilds.call_count == 1
+
+        client.clear_cache()
+        client.latest_build("gcc", "f44")
+        assert hub.getLatestBuilds.call_count == 2
+
+    def test_package_exists(self, hub):
+        hub.getLatestBuilds.side_effect = lambda tag, package: (
+            [_build("gcc", "15.1", "1.fc44")] if package == "gcc" else []
+        )
+        client = KojiClient()
+
+        assert client.package_exists("gcc", "f44") is True
+        assert client.package_exists("missing", "f44") is False
+
+    def test_prefetch_latest_builds(self, hub):
+        found = MagicMock(result=[_build("gcc", "15.1", "1.fc44")])
+        unknown = MagicMock()
+        type(unknown).result = property(lambda self: (_ for _ in ()).throw(koji.GenericError()))
+        multicall = hub.multicall.return_value.__enter__.return_value
+        multicall.getLatestBuilds.side_effect = lambda tag, package: (
+            found if package == "gcc" else unknown
+        )
+        client = KojiClient()
+
+        client.prefetch_latest_builds(["gcc", "nope", "gcc"], "f44")
+
+        assert multicall.getLatestBuilds.call_count == 2
+        assert client.latest_build("gcc", "f44")["nvr"] == "gcc-15.1-1.fc44"
+        assert client.latest_build("nope", "f44") is None
+        hub.getLatestBuilds.assert_not_called()
+
+    def test_prefetch_skips_cached(self, hub):
+        hub.getLatestBuilds.return_value = []
+        client = KojiClient()
+        client.latest_build("gcc", "f44")
+
+        client.prefetch_latest_builds(["gcc"], "f44")
+
+        hub.multicall.assert_not_called()
+
+    def test_prefetch_failure_falls_back(self, hub):
+        hub.multicall.side_effect = OSError("Connection refused")
+        hub.getLatestBuilds.return_value = []
+        client = KojiClient()
+
+        client.prefetch_latest_builds(["gcc"], "f44")
+
+        assert client.latest_build("gcc", "f44") is None
+        hub.getLatestBuilds.assert_called_once()
+
+    def test_get_target(self, hub):
+        hub.getBuildTarget.return_value = {
+            "build_tag_name": "f44-build",
+            "dest_tag_name": "f44-updates-candidate",
+        }
+
+        assert KojiClient().get_target("f44") == {
+            "build_tag": "f44-build",
+            "dest_tag": "f44-updates-candidate",
+        }
+
+    def test_get_target_missing(self, hub):
+        hub.getBuildTarget.return_value = None
+
+        assert KojiClient().get_target("nope") is None
+
+    def test_has_external_repos(self, hub):
+        hub.getExternalRepoList.return_value = [{"external_repo_name": "fedora-44"}]
+
+        assert KojiClient().has_external_repos("f44-build") is True
+
+    def test_has_no_external_repos(self, hub):
+        hub.getExternalRepoList.return_value = []
+
+        assert KojiClient().has_external_repos("f44-build") is False
 
 
 class TestDependencyNode:
@@ -41,116 +210,6 @@ class TestDependencyNode:
         assert node.dependencies == ["dep1", "dep2"]
         assert node.is_available is True
         assert node.build_order == 5
-
-
-class TestKojiClient:
-    def test_default_server(self):
-        client = KojiClient()
-
-        assert client.server == "https://koji.fedoraproject.org/kojihub"
-        assert client.web_url == "https://koji.fedoraproject.org/koji"
-
-    def test_custom_server(self):
-        client = KojiClient(
-            server="https://custom.koji.internal/kojihub",
-            web_url="https://custom.koji.internal/koji",
-            cert="/path/to/cert.pem",
-            serverca="/path/to/ca.crt",
-        )
-
-        assert client.server == "https://custom.koji.internal/kojihub"
-        assert client.cert == "/path/to/cert.pem"
-        assert client.serverca == "/path/to/ca.crt"
-
-    def test_list_packages_success(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3\ngcc\nmake\n"
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_packages("fedora-build")
-
-        assert "python3" in result
-        assert "gcc" in result
-        assert "make" in result
-
-    def test_list_packages_failure_raises(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stdout = ""
-        mock_subprocess_run.return_value.stderr = "Connection refused"
-        client = KojiClient()
-
-        with pytest.raises(KojiConnectionError, match="Failed to list packages"):
-            client.list_packages("fedora-build")
-
-    def test_list_tagged_builds_success(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = """python3-3.11.0-1.fc40  fedora-build  admin
-gcc-13.0-1.fc40  fedora-build  admin
-"""
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_tagged_builds("fedora-build")
-
-        assert "python3" in result
-        assert result["python3"] == "python3-3.11.0-1.fc40"
-        assert "gcc" in result
-        assert result["gcc"] == "gcc-13.0-1.fc40"
-
-    def test_list_tagged_builds_failure_raises(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stderr = "Connection error"
-        client = KojiClient()
-
-        with pytest.raises(KojiConnectionError, match="Failed to list builds"):
-            client.list_tagged_builds("fedora-build")
-
-    def test_package_exists_returns_true(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-3.11.0-1.fc40\n"
-        client = KojiClient()
-
-        result = client.package_exists("python3", "fedora-build")
-
-        assert result is True
-
-    def test_package_exists_returns_false(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = ""
-        client = KojiClient()
-
-        result = client.package_exists("nonexistent", "fedora-build")
-
-        assert result is False
-
-    def test_search_package_success(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3\npython3-devel\npython3-libs\n"
-        client = KojiClient()
-
-        result = client.search_package("python3*")
-
-        assert "python3" in result
-        assert "python3-devel" in result
-
-    def test_search_package_no_results(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stdout = ""
-        client = KojiClient()
-
-        result = client.search_package("nonexistent*")
-
-        assert result == []
-
-    def test_command_timeout_raises(self, mock_subprocess_run):
-        import subprocess
-
-        mock_subprocess_run.side_effect = subprocess.TimeoutExpired(cmd="koji", timeout=60)
-        client = KojiClient()
-
-        with pytest.raises(KojiConnectionError, match="timed out"):
-            client.list_packages("fedora-build")
 
 
 class TestDependencyResolver:
@@ -406,60 +465,6 @@ class TestDependencyResolver:
         assert "available" not in result
 
 
-class TestKojiClientGetEnv:
-    def test_get_env_with_no_ssl_verify(self):
-        """_get_env with no_ssl_verify should set SSL env vars."""
-        client = KojiClient(no_ssl_verify=True)
-
-        env = client._get_env()
-
-        assert env is not None
-        assert env["PYTHONHTTPSVERIFY"] == "0"
-        assert env["REQUESTS_CA_BUNDLE"] == ""
-        assert env["CURL_CA_BUNDLE"] == ""
-
-    def test_get_env_without_no_ssl_verify(self):
-        """_get_env without no_ssl_verify should return None."""
-        client = KojiClient(no_ssl_verify=False)
-
-        env = client._get_env()
-
-        assert env is None
-
-
-class TestKojiClientRunCommand:
-    def test_run_command_with_cert_serverca(self, mock_subprocess_run):
-        """_run_koji_command should include cert and serverca args."""
-        mock_subprocess_run.return_value.returncode = 0
-        client = KojiClient(cert="/path/cert.pem", serverca="/path/ca.crt")
-
-        client._run_koji_command("list-tags")
-
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "--cert=/path/cert.pem" in call_args
-        # --serverca is not passed on CLI (RHEL9 compat); read from ~/.koji/config
-        assert not any("--serverca" in a for a in call_args)
-
-    def test_run_command_with_cert_only(self, mock_subprocess_run):
-        """_run_koji_command with cert but no serverca."""
-        mock_subprocess_run.return_value.returncode = 0
-        client = KojiClient(cert="/path/cert.pem", serverca=None)
-
-        client._run_koji_command("list-tags")
-
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "--cert=/path/cert.pem" in call_args
-        assert not any("--serverca" in a for a in call_args)
-
-    def test_run_command_generic_exception(self, mock_subprocess_run):
-        """_run_koji_command should wrap generic exceptions as KojiConnectionError."""
-        mock_subprocess_run.side_effect = OSError("Permission denied")
-        client = KojiClient()
-
-        with pytest.raises(KojiConnectionError, match="Failed to run koji command"):
-            client._run_koji_command("list-tags")
-
-
 class TestDependencyResolverWithNameResolver:
     def test_find_missing_deps_with_name_resolver(self, mock_koji_client):
         """find_missing_deps should use name_resolver to resolve names."""
@@ -555,62 +560,6 @@ class TestFindMissingDepsOriginalNameFallback:
         assert result == []
 
 
-class TestListPackagesEmptyLines:
-    def test_list_packages_with_empty_lines(self, mock_subprocess_run):
-        """list_packages should handle empty lines in output."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3\n\ngcc\n\n"
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_packages("fedora-build")
-
-        assert "python3" in result
-        assert "gcc" in result
-
-    def test_list_packages_with_whitespace_only_line(self, mock_subprocess_run):
-        """list_packages should handle whitespace-only lines."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3\n   \ngcc\n"
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_packages("fedora-build")
-
-        assert "python3" in result
-        assert "gcc" in result
-
-    def test_list_tagged_builds_with_empty_lines(self, mock_subprocess_run):
-        """list_tagged_builds should handle empty lines in output."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = (
-            "python3-3.11.0-1.fc40  fedora-build  admin\n\ngcc-13.0-1.fc40  fedora-build  admin\n"
-        )
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_tagged_builds("fedora-build")
-
-        assert "python3" in result
-        assert "gcc" in result
-
-
-class TestListTaggedBuildsWhitespaceLine:
-    def test_list_tagged_builds_whitespace_only_line(self, mock_subprocess_run):
-        """list_tagged_builds should handle whitespace-only lines."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = (
-            "python3-3.11.0-1.fc40  tag  admin\n   \ngcc-13.0-1.fc40  tag  admin\n"
-        )
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        result = client.list_tagged_builds("fedora-build")
-
-        assert "python3" in result
-        assert "gcc" in result
-
-
 class TestFindMissingDepsOriginalNameNotFound:
     def test_original_name_not_in_koji(self, mock_koji_client):
         """When resolved != name and original name NOT found, append to missing."""
@@ -680,70 +629,6 @@ class TestGetBuildChainWithAvailableDep:
 
         assert len(result) >= 1
         assert "pkg-a" in result[0]
-
-
-class TestKojiClientGetTarget:
-    def test_get_target(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "f44     f44-build     f44-updates-candidate\n"
-        client = KojiClient()
-
-        assert client.get_target("f44") == {
-            "build_tag": "f44-build",
-            "dest_tag": "f44-updates-candidate",
-        }
-        assert "--name=f44" in mock_subprocess_run.call_args[0][0]
-
-    def test_get_target_missing(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 2
-        mock_subprocess_run.return_value.stdout = ""
-        mock_subprocess_run.return_value.stderr = "koji: error: No such build target: nope\n"
-        client = KojiClient()
-
-        assert client.get_target("nope") is None
-
-    def test_get_target_koji_error(self, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stdout = ""
-        mock_subprocess_run.return_value.stderr = "Connection refused"
-        client = KojiClient()
-
-        with pytest.raises(KojiConnectionError):
-            client.get_target("f44")
-
-
-class TestKojiClientHasExternalRepos:
-    def test_has_external_repos_true(self, mock_subprocess_run):
-        """has_external_repos returns True when external repos are configured."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = (
-            "Tag                  Repo Name            URL\n"
-            "---                  ---------            ---\n"
-            "f42-build            fedora-42            "
-            "http://kojipkgs.fedoraproject.org/repos/f42/\n"
-        )
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        assert client.has_external_repos("f42-build") is True
-
-    def test_has_external_repos_false_empty(self, mock_subprocess_run):
-        """has_external_repos returns False when no repos configured."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = ""
-        mock_subprocess_run.return_value.stderr = ""
-        client = KojiClient()
-
-        assert client.has_external_repos("f42-build") is False
-
-    def test_has_external_repos_false_on_error(self, mock_subprocess_run):
-        """has_external_repos returns False on command error."""
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stdout = ""
-        mock_subprocess_run.return_value.stderr = "error"
-        client = KojiClient()
-
-        assert client.has_external_repos("f42-build") is False
 
 
 class TestDependencyResolverExternalRepos:
@@ -897,3 +782,25 @@ class TestVersionConstraints:
         dep = BuildRequirement(name="python3-cffi", version="1.12", operator=">=")
 
         assert "python3-cffi" in resolver.find_missing_deps([dep])
+
+
+class TestFindMissingDepsPrefetch:
+    def test_prefetches_all_candidates_once(self, mock_koji_client):
+        mock_nr = Mock()
+        mock_nr.resolve.side_effect = lambda n: "python3-foo" if n == "python3dist(foo)" else n
+        mock_nr.resolve_srpm_name.side_effect = lambda n: [f"src-{n}"]
+        mock_koji_client.list_packages.return_value = []
+        mock_koji_client.has_external_repos.return_value = True
+        resolver = DependencyResolver(koji_client=mock_koji_client, name_resolver=mock_nr)
+
+        resolver.find_missing_deps([BuildRequirement(name="python3dist(foo)"), "gcc"])
+
+        names, tag = mock_koji_client.prefetch_latest_builds.call_args.args
+        assert tag == "fedora-build"
+        assert set(names) == {
+            "python3dist(foo)",
+            "python3-foo",
+            "src-python3-foo",
+            "gcc",
+            "src-gcc",
+        }

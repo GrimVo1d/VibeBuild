@@ -5,13 +5,12 @@ Dependency resolver - checks dependencies in Koji and builds DAG.
 from __future__ import annotations
 
 import logging
-import os
-import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
-from vibebuild._retry import with_retry
+import koji  # type: ignore[import-untyped]
+
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
 from vibebuild.exceptions import CircularDependencyError, KojiConnectionError
 
@@ -80,7 +79,11 @@ class DependencyNode:
 
 
 class KojiClient:
-    """Client for interacting with Koji."""
+    """Read-only client for one Koji hub over XML-RPC (anonymous session).
+
+    Answers are cached per client: within one vibebuild run the tags only change
+    through our own builds, and callers that need fresh data call `clear_cache`.
+    """
 
     def __init__(
         self,
@@ -95,108 +98,87 @@ class KojiClient:
         self.cert = cert
         self.serverca = serverca
         self.no_ssl_verify = no_ssl_verify
+        self._session: Optional[koji.ClientSession] = None
+        self._latest: dict[tuple[str, str], Optional[dict[str, str]]] = {}
 
-    def _get_env(self) -> Optional[dict]:
-        """Get environment variables for subprocess, with SSL verification disabled if needed."""
-        if self.no_ssl_verify:
-            env = os.environ.copy()
-            env["PYTHONHTTPSVERIFY"] = "0"
-            env["REQUESTS_CA_BUNDLE"] = ""
-            env["CURL_CA_BUNDLE"] = ""
-            return env
-        return None
+    @property
+    def session(self) -> koji.ClientSession:
+        """Anonymous session, created on first use. koji retries connection errors itself."""
+        if self._session is None:
+            opts: dict = {"anon_retry": True, "max_retries": 3, "retry_interval": 2}
+            if self.no_ssl_verify:
+                opts["no_ssl_verify"] = True
+            elif self.serverca:
+                opts["serverca"] = self.serverca
+            self._session = koji.ClientSession(self.server, opts=opts)
+        return self._session
 
-    @with_retry(attempts=3, initial_delay=1.0, backoff=2.0)
-    def _run_koji_command(self, *args) -> subprocess.CompletedProcess:
-        """Run koji command with configured options.
-
-        Wrapped in retry: on network/timeout errors it retries up to 3 times
-        with exponential backoff (1s → 2s → 4s). Programming errors (broken
-        arguments, missing tag) are not retried: KojiConnectionError
-        carries text that does not match the transient markers.
-        """
-        cmd = ["koji", f"--server={self.server}"]
-
-        if self.cert:
-            cmd.append(f"--cert={self.cert}")
-        # Note: --serverca is not supported on RHEL9/older koji CLI.
-        # The serverca is read from ~/.koji/config instead.
-
-        cmd.extend(args)
-
+    def _call(self, method: str, *args, **kwargs):
+        """Call a hub method; transport failures become KojiConnectionError."""
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, env=self._get_env()
-            )
-            return result
-        except subprocess.TimeoutExpired:
-            raise KojiConnectionError(f"Koji command timed out: {' '.join(cmd)}")
-        except Exception as e:
-            raise KojiConnectionError(f"Failed to run koji command: {e}")
+            return getattr(self.session, method)(*args, **kwargs)
+        except koji.GenericError:
+            raise
+        except Exception as exc:
+            raise KojiConnectionError(f"Koji call {method} failed: {exc}") from exc
+
+    def clear_cache(self) -> None:
+        """Forget cached builds (after tagging new ones)."""
+        self._latest.clear()
 
     def list_packages(self, tag: str) -> list[str]:
-        """List all packages in a tag."""
-        result = self._run_koji_command("list-pkgs", f"--tag={tag}", "--quiet")
-
-        if result.returncode != 0:
-            # "no matching packages" is normal for empty tags
-            if "no matching packages" in (result.stderr + result.stdout):
-                return []
-            raise KojiConnectionError(f"Failed to list packages: {result.stderr}")
-
-        packages = []
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                parts = line.split()
-                if parts:
-                    packages.append(parts[0])
-
-        return packages
+        """Names of packages in the tag's package list (inherited, not blocked)."""
+        packages = self._call("listPackages", tagID=tag, inherited=True, with_blocked=False)
+        return [p["package_name"] for p in packages or []]
 
     def list_tagged_builds(self, tag: str) -> dict[str, str]:
-        """List all builds in a tag, returns {package_name: nvr}."""
-        result = self._run_koji_command("list-tagged", tag, "--quiet")
+        """Latest build of every package in the tag: {package_name: nvr}."""
+        builds = self._call("listTagged", tag, latest=True)
+        return {b["package_name"]: b["nvr"] for b in builds or []}
 
-        if result.returncode != 0:
-            raise KojiConnectionError(f"Failed to list builds: {result.stderr}")
-
-        builds = {}
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                parts = line.split()
-                if parts:
-                    nvr = parts[0]
-                    name = "-".join(nvr.rsplit("-", 2)[:-2])
-                    builds[name] = nvr
-
-        return builds
-
-    def package_exists(self, package: str, tag: str) -> bool:
-        """Check if package has a build tagged in the given tag (including inherited)."""
-        result = self._run_koji_command("list-tagged", tag, package, "--quiet", "--inherit")
-        return bool(result.stdout.strip())
+    @staticmethod
+    def _build_info(builds) -> Optional[dict[str, str]]:
+        if not builds:
+            return None
+        b = builds[0]
+        return {"nvr": b["nvr"], "version": b["version"], "release": b["release"]}
 
     def latest_build(self, package: str, tag: str) -> Optional[dict[str, str]]:
         """
-        Return the NVR and parsed version/release of the latest build of a package in the tag.
+        Latest build of a package in the tag, inheritance included.
 
         Returns:
             {"nvr": "...", "version": "...", "release": "..."} or None if there is no build.
         """
-        result = self._run_koji_command(
-            "list-tagged", tag, package, "--quiet", "--inherit", "--latest"
-        )
-        if result.returncode != 0:
-            return None
-        line = result.stdout.strip().split("\n")[0] if result.stdout.strip() else ""
-        if not line:
-            return None
-        nvr = line.split()[0]
-        # Parse NVR from the end: <release> (maybe with dist suffix), <version>, rest is the name
-        parts = nvr.rsplit("-", 2)
-        if len(parts) < 3:
-            return None
-        return {"nvr": nvr, "version": parts[-2], "release": parts[-1]}
+        key = (package, tag)
+        if key not in self._latest:
+            try:
+                builds = self._call("getLatestBuilds", tag, package=package)
+            except koji.GenericError:  # unknown package name
+                builds = []
+            self._latest[key] = self._build_info(builds)
+        return self._latest[key]
+
+    def prefetch_latest_builds(self, packages: Sequence[str], tag: str) -> None:
+        """Look up the latest builds of many packages in one multicall request."""
+        names = sorted({p for p in packages if (p, tag) not in self._latest})
+        if not names:
+            return
+        try:
+            with self.session.multicall(strict=False) as m:
+                calls = {name: m.getLatestBuilds(tag, package=name) for name in names}
+        except Exception as exc:
+            logger.debug("multicall getLatestBuilds failed, falling back to single calls: %s", exc)
+            return
+        for name, call in calls.items():
+            try:
+                self._latest[(name, tag)] = self._build_info(call.result)
+            except koji.GenericError:  # unknown package name
+                self._latest[(name, tag)] = None
+
+    def package_exists(self, package: str, tag: str) -> bool:
+        """Check if package has a build tagged in the given tag (including inherited)."""
+        return self.latest_build(package, tag) is not None
 
     def get_target(self, target: str) -> Optional[dict[str, str]]:
         """
@@ -205,36 +187,14 @@ class KojiClient:
         Returns:
             {"build_tag": "...", "dest_tag": "..."} or None if the target does not exist.
         """
-        result = self._run_koji_command("list-targets", f"--name={target}", "--quiet")
-        if result.returncode != 0:
-            if "No such build target" in result.stderr:
-                return None
-            raise KojiConnectionError(f"Failed to get build target {target}: {result.stderr}")
-        parts = result.stdout.split()
-        if len(parts) < 3:
+        info = self._call("getBuildTarget", target)
+        if not info:
             return None
-        return {"build_tag": parts[1], "dest_tag": parts[2]}
+        return {"build_tag": info["build_tag_name"], "dest_tag": info["dest_tag_name"]}
 
     def has_external_repos(self, tag: str) -> bool:
-        """Check if a tag has external repos configured."""
-        result = self._run_koji_command("list-external-repos", f"--tag={tag}")
-        if result.returncode != 0:
-            return False
-        # Output has header lines; actual repos have URL-like content
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line and "http" in line:
-                return True
-        return False
-
-    def search_package(self, pattern: str) -> list[str]:
-        """Search for packages by pattern."""
-        result = self._run_koji_command("search", "package", pattern)
-
-        if result.returncode != 0:
-            return []
-
-        return [line.strip() for line in result.stdout.strip().split("\n") if line]
+        """Check if a tag has external repos configured (inheritance included)."""
+        return bool(self._call("getExternalRepoList", tag))
 
 
 class DependencyResolver:
@@ -350,6 +310,21 @@ class DependencyResolver:
                 pass
         return False
 
+    def _prefetch(self, deps: Sequence[str | BuildRequirement]) -> None:
+        """Ask Koji about every name find_missing_deps may look up, in one request."""
+        names: list[str] = []
+        for dep in deps:
+            name = dep.name if isinstance(dep, BuildRequirement) else dep
+            names.append(name)
+            if self.name_resolver:
+                resolved = self.name_resolver.resolve(name)
+                names.append(resolved)
+                try:
+                    names.extend(self.name_resolver.resolve_srpm_name(resolved))
+                except (TypeError, AttributeError):
+                    pass
+        self.koji.prefetch_latest_builds([n for n in names if isinstance(n, str)], self.koji_tag)
+
     def find_missing_deps(
         self, deps: Sequence[str | BuildRequirement], check_provides: bool = True
     ) -> list[str]:
@@ -365,6 +340,7 @@ class DependencyResolver:
         """
         missing = []
         has_ext_repos = self._check_external_repos()
+        self._prefetch(deps)
 
         for dep in deps:
             name = dep.name if isinstance(dep, BuildRequirement) else dep

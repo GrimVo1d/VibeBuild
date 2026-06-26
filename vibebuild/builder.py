@@ -591,6 +591,7 @@ class KojiBuilder:
             return False
         logger.info(f"Triggered newRepo for {tag} (task {task_id})")
         state = self._await_task(task_id, timeout=timeout)
+        self.koji_client.clear_cache()
         if state == "closed":
             logger.info("Repo regenerated successfully")
             return True
