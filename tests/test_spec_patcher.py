@@ -1,15 +1,31 @@
-"""Tests for vibebuild.spec_patcher.patch_spec_text.
+"""Tests for vibebuild.spec_patcher.
 
-Verify the edits:
+patch_spec_text edits:
 1. The `%check` section is cut out entirely, up to the next RPM section, always.
 2. `%define _unpackaged_files_terminate_build 0` is added only when
    `add_unpackaged_macro=True` (builder raises the flag on retry after an error
    "Installed (but unpackaged) file(s) found").
 """
 
+import io
+import subprocess
+import tarfile
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
-from vibebuild.spec_patcher import UNPACKAGED_MACRO, patch_spec_text
+from vibebuild import spec_patcher
+from vibebuild.exceptions import VibeBuildError
+from vibebuild.spec_patcher import (
+    UNPACKAGED_MACRO,
+    _extract_srpm,
+    _rpm_path,
+    _sandboxed,
+    cleanup_patched,
+    patch_spec_text,
+    patch_srpm,
+)
 
 FULL_SPEC = """\
 Name: foo
@@ -165,3 +181,205 @@ def test_section_with_arguments_resumes_parsing(section: str):
     assert "make test" not in patched
     assert section in patched
     assert "body line" in patched
+
+
+def _tgz(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.fixture
+def fake_rpm2archive(monkeypatch):
+    """rpm2archive replaced by `cat`: the "SRPM" file already holds the tar.gz."""
+    real_popen = subprocess.Popen
+
+    def popen(cmd, **kwargs):
+        assert cmd == ["rpm2archive", "-"]
+        return real_popen(["cat"], **kwargs)
+
+    monkeypatch.setattr(spec_patcher.subprocess, "Popen", popen)
+
+
+class TestExtractSrpm:
+    def test_extracts_into_dest(self, tmp_path, fake_rpm2archive):
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(_tgz({"foo.spec": b"Name: foo", "foo.tar.gz": b"src"}))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        _extract_srpm(srpm, dest, timeout=30)
+
+        assert (dest / "foo.spec").read_bytes() == b"Name: foo"
+
+    def test_refuses_parent_dir_paths(self, tmp_path, fake_rpm2archive):
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(_tgz({"../evil": b"pwned"}))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with pytest.raises(VibeBuildError, match="Cannot extract"):
+            _extract_srpm(srpm, dest, timeout=30)
+
+        assert not (tmp_path / "evil").exists()
+
+    def test_absolute_paths_land_inside_dest(self, tmp_path, fake_rpm2archive):
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(_tgz({str(tmp_path / "evil"): b"pwned"}))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        _extract_srpm(srpm, dest, timeout=30)
+
+        assert not (tmp_path / "evil").exists()
+        assert (dest / str(tmp_path / "evil").lstrip("/")).read_bytes() == b"pwned"
+
+    def test_not_an_archive(self, tmp_path, fake_rpm2archive):
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(b"not gzip")
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with pytest.raises(VibeBuildError, match="Cannot extract"):
+            _extract_srpm(srpm, dest, timeout=30)
+
+
+def test_rpm_path_escapes_percent():
+    assert _rpm_path(Path("/tmp/a%{lua:x}")) == "/tmp/a%%{lua:x}"
+
+
+class TestSandboxed:
+    @pytest.fixture(autouse=True)
+    def fresh_probe(self):
+        spec_patcher._bwrap.cache_clear()
+        yield
+        spec_patcher._bwrap.cache_clear()
+
+    @pytest.fixture
+    def probe(self):
+        with (
+            patch("vibebuild.spec_patcher.shutil.which", return_value="/usr/bin/bwrap"),
+            patch("vibebuild.spec_patcher.subprocess.run") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            yield run
+
+    def test_wraps_in_bwrap(self, tmp_path, probe):
+        cmd = _sandboxed(["rpmbuild", "-bs", "x.spec"], tmp_path)
+
+        assert cmd[0] == "/usr/bin/bwrap"
+        assert "--unshare-all" in cmd
+        assert cmd[-3:] == ["rpmbuild", "-bs", "x.spec"]
+        i = cmd.index("--bind")
+        assert cmd[i + 1 : i + 3] == [str(tmp_path), str(tmp_path)]
+
+    def test_bwrap_is_probed_once(self, tmp_path, probe):
+        _sandboxed(["a"], tmp_path)
+        _sandboxed(["b"], tmp_path)
+
+        assert probe.call_count == 1
+
+    def test_without_bwrap_runs_as_is_with_warning(self, tmp_path, caplog):
+        with patch("vibebuild.spec_patcher.shutil.which", return_value=None):
+            cmd = _sandboxed(["rpmbuild"], tmp_path)
+
+        assert cmd == ["rpmbuild"]
+        assert "bwrap not found" in caplog.text
+
+    def test_bwrap_without_namespaces_runs_as_is_with_warning(self, tmp_path, probe, caplog):
+        probe.return_value = subprocess.CompletedProcess(
+            [], 1, "", "bwrap: No permissions to create a new namespace\n"
+        )
+
+        cmd = _sandboxed(["rpmbuild"], tmp_path)
+
+        assert cmd == ["rpmbuild"]
+        assert "No permissions to create a new namespace" in caplog.text
+
+
+class TestPatchSrpm:
+    @pytest.fixture
+    def srpm(self, tmp_path):
+        path = tmp_path / "foo-1.0-1.src.rpm"
+        path.write_bytes(b"srpm")
+        return path
+
+    @pytest.fixture
+    def extract(self):
+        def fake(srpm, dest, timeout):
+            (dest / "foo.spec").write_text(FULL_SPEC)
+
+        with patch("vibebuild.spec_patcher._extract_srpm", side_effect=fake) as mock:
+            yield mock
+
+    @pytest.fixture
+    def rpmbuild(self):
+        def fake(cmd, **kwargs):
+            topdir = Path(cmd[cmd.index("--define") + 1].removeprefix("_topdir "))
+            (topdir / "foo-1.0-1.src.rpm").write_bytes(b"patched")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with (
+            patch("vibebuild.spec_patcher._bwrap", return_value=None),
+            patch("vibebuild.spec_patcher.subprocess.run", side_effect=fake) as mock,
+        ):
+            yield mock
+
+    def test_rebuilds_patched_srpm_in_temp_dir(self, srpm, extract, rpmbuild):
+        patched = Path(patch_srpm(str(srpm), add_unpackaged_macro=True))
+        try:
+            assert patched.parent.name.startswith("vibebuild-patch-")
+            assert patched.read_bytes() == b"patched"
+            spec = (patched.parent / "SPECS" / "foo.spec").read_text()
+            assert "%check" not in spec
+            assert spec.startswith(UNPACKAGED_MACRO)
+        finally:
+            cleanup_patched(str(patched))
+        assert not patched.parent.exists()
+
+    def test_rpmbuild_failure_leaves_nothing(self, srpm, extract, rpmbuild, tmp_path):
+        rpmbuild.side_effect = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "bad")
+        dirs = []
+        real_mkdtemp = spec_patcher.tempfile.mkdtemp
+
+        def mkdtemp(**kwargs):
+            dirs.append(Path(real_mkdtemp(**kwargs)))
+            return str(dirs[-1])
+
+        with patch("vibebuild.spec_patcher.tempfile.mkdtemp", side_effect=mkdtemp):
+            with pytest.raises(VibeBuildError, match="rpmbuild -bs failed"):
+                patch_srpm(str(srpm))
+
+        assert dirs and not dirs[0].exists()
+
+    def test_rpmbuild_timeout(self, srpm, extract, rpmbuild):
+        rpmbuild.side_effect = subprocess.TimeoutExpired("rpmbuild", 1)
+
+        with pytest.raises(VibeBuildError, match="timed out"):
+            patch_srpm(str(srpm))
+
+    def test_symlinked_spec_is_ignored(self, srpm, extract, rpmbuild, tmp_path):
+        target = tmp_path / "secret"
+        target.write_text("x")
+        extract.side_effect = lambda s, dest, t: (dest / "foo.spec").symlink_to(target)
+
+        with pytest.raises(VibeBuildError, match="No spec file"):
+            patch_srpm(str(srpm))
+
+    def test_missing_srpm(self, tmp_path):
+        with pytest.raises(VibeBuildError, match="SRPM not found"):
+            patch_srpm(str(tmp_path / "nope.src.rpm"))
+
+
+def test_cleanup_patched_only_removes_its_own_dirs(tmp_path):
+    other = tmp_path / "keep"
+    other.mkdir()
+    (other / "x.src.rpm").write_text("x")
+
+    cleanup_patched(str(other / "x.src.rpm"))
+
+    assert other.exists()

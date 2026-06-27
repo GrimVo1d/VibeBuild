@@ -1,394 +1,235 @@
 """
-SRPM fetcher - downloads source RPMs from Fedora and other sources.
+SRPM fetcher - downloads source RPMs from Fedora Koji.
+
+Every download is checked against the digest Koji recorded for the build
+(`payloadhash`, the MD5 of the RPM header and payload). The digest is computed
+from the file's bytes, not read from its signature header, so a cached or freshly
+downloaded file is used only when it is exactly the SRPM Fedora built.
 """
 
+from __future__ import annotations
+
+import hashlib
+import logging
 import os
 import re
-import subprocess
+import struct
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-try:
-    import requests  # pragma: no cover
+import koji  # type: ignore[import-untyped]
+import requests
 
-    HAS_REQUESTS = True  # pragma: no cover
-except ImportError:  # pragma: no cover
-    requests = None
-    HAS_REQUESTS = False
-
+from vibebuild._retry import with_retry
 from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class SRPMSource:
-    """Configuration for an SRPM source."""
+FEDORA_KOJI = "https://koji.fedoraproject.org/kojihub"
+FEDORA_PACKAGES = "https://kojipkgs.fedoraproject.org/packages"
 
-    name: str
-    base_url: str
-    koji_server: Optional[str] = None
-    priority: int = 100
+# Fedora SRPMs are rarely over 1 GiB; anything far beyond that is not an SRPM.
+MAX_SRPM_BYTES = 4 * 1024**3
+
+# Characters allowed in a Koji package name and NVR; anything else could escape
+# the download directory or the URL path.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+~^-]*$")
+
+
+def default_download_dir() -> Path:
+    """Per-user SRPM cache: $XDG_CACHE_HOME/vibebuild/srpms (~/.cache by default)."""
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(cache) / "vibebuild" / "srpms"
+
+
+_RPM_LEAD_MAGIC = b"\xed\xab\xee\xdb"
+_RPM_HEADER_MAGIC = b"\x8e\xad\xe8\x01\x00\x00\x00\x00"
+
+
+def srpm_digest(path: Path) -> str:
+    """MD5 of an RPM's header and payload, which Koji records as `payloadhash`.
+
+    That is everything after the 96-byte lead and the signature header. The
+    SIGMD5 tag holds the same value, but it is only what the file claims, and
+    rpm 6 no longer checks it.
+    """
+    try:
+        with path.open("rb") as f:
+            lead = f.read(96)
+            intro = f.read(16)
+            if lead[:4] != _RPM_LEAD_MAGIC or intro[:8] != _RPM_HEADER_MAGIC:
+                raise VibeBuildError(f"Not an RPM file: {path.name}")
+            count, size = struct.unpack(">II", intro[8:])
+            signature = 16 * count + size
+            f.seek(signature + (-signature) % 8, os.SEEK_CUR)  # padded to 8 bytes
+            # Koji records only MD5; it is compared against Koji's value, not trusted alone
+            return hashlib.file_digest(f, "md5").hexdigest()  # nosec B324
+    except OSError as e:
+        raise VibeBuildError(f"Cannot read {path.name}: {e}") from e
 
 
 class SRPMFetcher:
-    """
-    Fetches SRPMs from various sources.
-
-    Primary source is Fedora's Koji, but can also use
-    src.fedoraproject.org and other mirrors.
-    """
-
-    DEFAULT_SOURCES = [
-        SRPMSource(
-            name="fedora-koji",
-            base_url="https://kojipkgs.fedoraproject.org/packages",
-            koji_server="https://koji.fedoraproject.org/kojihub",
-            priority=10,
-        ),
-        SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=20),
-    ]
+    """Fetches SRPMs of the latest Fedora builds from Fedora Koji."""
 
     def __init__(
         self,
         download_dir: Optional[str] = None,
-        sources: Optional[list[SRPMSource]] = None,
         fedora_release: str = "rawhide",
         no_ssl_verify: bool = False,
         name_resolver=None,
+        koji_server: str = FEDORA_KOJI,
+        packages_url: str = FEDORA_PACKAGES,
     ):
-        self.download_dir = (
-            Path(download_dir) if download_dir else Path(tempfile.gettempdir()) / "vibebuild"
-        )
-        self.download_dir.mkdir(parents=True, exist_ok=True)
-        self.sources = sorted(sources or self.DEFAULT_SOURCES, key=lambda s: s.priority)
+        if download_dir:
+            self.download_dir = Path(download_dir)
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.download_dir = default_download_dir()
+            self.download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.fedora_release = fedora_release
         self.no_ssl_verify = no_ssl_verify
         self.name_resolver = name_resolver
+        self.koji_server = koji_server
+        self.packages_url = packages_url.rstrip("/")
         self._cache: dict[str, str] = {}
 
-    def _get_env(self) -> Optional[dict]:
-        """Get environment variables for subprocess, with SSL verification disabled if needed."""
+    def _session(self) -> koji.ClientSession:
+        """A fresh anonymous session: downloads run in parallel threads."""
+        opts: dict = {"anon_retry": True, "max_retries": 3, "retry_interval": 2}
         if self.no_ssl_verify:
-            env = os.environ.copy()
-            env["PYTHONHTTPSVERIFY"] = "0"
-            env["REQUESTS_CA_BUNDLE"] = ""
-            env["CURL_CA_BUNDLE"] = ""
-            return env
-        return None
+            opts["no_ssl_verify"] = True
+        return koji.ClientSession(self.koji_server, opts=opts)
 
     def download_srpm(self, package_name: str, version: Optional[str] = None) -> str:
         """
-        Download SRPM for a package.
+        Download the SRPM of a package's latest build (or of `version`).
 
-        Tries each configured source until SRPM is found.
-        If a name_resolver is configured, tries multiple SRPM name variants.
+        If a name_resolver is configured, tries its SRPM name candidates in order.
 
         Args:
-            package_name: Name of the package
-            version: Optional specific version to download
+            package_name: Package (or RPM/provide) name
+            version: Optional "version-release" of the build to download
 
         Returns:
-            Path to downloaded SRPM file
+            Path to the verified SRPM file
 
         Raises:
-            SRPMNotFoundError: If SRPM cannot be found in any source
+            SRPMNotFoundError: If no candidate name has a build in Fedora Koji
         """
-        # Get SRPM name variants to try (ML + rule-based via resolver, or just the name)
         if self.name_resolver:
             names_to_try = self.name_resolver.get_download_candidates(package_name)
         else:
             names_to_try = [package_name]
 
-        last_errors: list[str] = []
+        errors: list[str] = []
         for name in names_to_try:
             cache_key = f"{name}-{version or 'latest'}"
-            if cache_key in self._cache:
-                cached_path = self._cache[cache_key]
-                if Path(cached_path).exists():
-                    return cached_path
-
-            errors = []
-
-            for source in self.sources:
-                try:
-                    if source.koji_server:
-                        srpm_path = self._download_from_koji(name, version, source)
-                    else:
-                        srpm_path = self._download_from_src(name, version, source)
-
-                    self._cache[cache_key] = srpm_path
-                    return srpm_path
-
-                except Exception as e:
-                    errors.append(f"{source.name}: {str(e)}")
-                    continue
-
-            last_errors = errors
+            cached = self._cache.get(cache_key)
+            if cached and Path(cached).exists():
+                return cached
+            try:
+                path = self._download_from_koji(name, version)
+            except SRPMNotFoundError as e:
+                errors.append(str(e))
+                continue
+            self._cache[cache_key] = path
+            return path
 
         msg = f"Could not find SRPM for {package_name} (tried: {names_to_try})"
-        if last_errors:
-            msg += "\n" + "\n".join(f"  {e}" for e in last_errors)
+        if errors:
+            msg += "\n" + "\n".join(f"  {e}" for e in errors)
         raise SRPMNotFoundError(msg)
 
-    def _resolve_rawhide_tag(self, server) -> Optional[str]:
-        """Determine the current rawhide Fedora version tag by querying Koji."""
-        try:
-            # getBuildTarget('rawhide') returns the target info including dest_tag
-            target_info = server.getBuildTarget("rawhide")
-            if target_info and target_info.get("dest_tag_name"):
-                # dest_tag_name is like "f44" for current rawhide
-                return target_info["dest_tag_name"]
-        except Exception:
-            pass
-        # Fallback: probe tags from high to low
-        for ver in range(45, 38, -1):
+    def _release_tags(self, session: koji.ClientSession) -> list[str]:
+        """Tags to look the latest build up in, most specific first."""
+        if self.fedora_release == "rawhide":
+            target = session.getBuildTarget("rawhide")
+            if not target:
+                raise SRPMNotFoundError("Fedora Koji has no rawhide target")
+            return [target["build_tag_name"]]
+        tag = self.fedora_release
+        if not tag.startswith("f"):
+            tag = f"f{tag}"
+        # f<N>-updates inherits f<N>: it sees stable updates as well as the GA builds
+        return [f"{tag}-updates", tag]
+
+    def _find_build(self, session: koji.ClientSession, name: str, version: Optional[str]):
+        if version:
+            return session.getBuild(f"{name}-{version}")
+        for tag in self._release_tags(session):
             try:
-                tag = server.getTag(f"f{ver}")
-                if tag:
-                    return f"f{ver}"
-            except Exception:
+                builds = session.getLatestBuilds(tag, package=name)
+            except koji.GenericError:  # unknown tag or package
                 continue
+            if builds:
+                return builds[0]
         return None
 
-    def _download_from_koji(
-        self, package_name: str, version: Optional[str], source: SRPMSource
-    ) -> str:
-        """Download SRPM from Koji using XML-RPC API (no CLI needed)."""
-        # The Koji hub is a trusted source (TLS + CA from ~/.koji/config),
-        # spoofing the response would require a MITM with a trusted CA.
-        import xmlrpc.client  # nosec B411
-
+    def _download_from_koji(self, package_name: str, version: Optional[str]) -> str:
+        """Find the build in Koji, download its SRPM and check it against Koji's digest."""
+        if not _SAFE_NAME.match(package_name):
+            raise SRPMNotFoundError(f"Invalid package name: {package_name!r}")
+        session = self._session()
         try:
-            server = xmlrpc.client.ServerProxy(source.koji_server, allow_none=True)
-        except Exception as e:
-            raise SRPMNotFoundError(f"Cannot connect to Koji: {e}")
-
-        # Find the latest build
-        if self.fedora_release == "rawhide":
-            tag = self._resolve_rawhide_tag(server)
-        else:
-            tag = (
-                f"f{self.fedora_release}"
-                if not self.fedora_release.startswith("f")
-                else self.fedora_release
-            )
-        try:
-            if version:
-                build_info = server.getBuild(f"{package_name}-{version}")
-            else:
-                builds = server.getLatestBuilds(tag, None, package_name)
-                if not builds:
-                    builds = server.getLatestBuilds("rawhide", None, package_name)
-                if not builds:
-                    # Try the previous release tag as well
-                    tag_num = (
-                        int(tag.lstrip("f")) if tag.startswith("f") and tag[1:].isdigit() else 0
-                    )
-                    if tag_num > 0:
-                        for prev in range(tag_num - 1, tag_num - 4, -1):
-                            builds = server.getLatestBuilds(f"f{prev}", None, package_name)
-                            if builds:
-                                break
-                if not builds:
-                    raise SRPMNotFoundError(f"Package {package_name} not found in Koji")
-                build_info = builds[0]
+            build = self._find_build(session, package_name, version)
+            if not build:
+                raise SRPMNotFoundError(f"Package {package_name} not found in Fedora Koji")
+            srpms = session.listRPMs(buildID=build["build_id"], arches="src")
         except SRPMNotFoundError:
             raise
-        except Exception:
-            raise SRPMNotFoundError(f"Package {package_name} not found in Koji")
+        except Exception as e:
+            raise SRPMNotFoundError(f"Koji lookup for {package_name} failed: {e}") from e
+        if not srpms:
+            raise SRPMNotFoundError(f"Build {build['nvr']} has no SRPM")
 
-        if not build_info:
-            raise SRPMNotFoundError(f"Package {package_name} not found in Koji")
+        nvr, digest = build["nvr"], srpms[0]["payloadhash"]
+        if not (_SAFE_NAME.match(build["name"]) and _SAFE_NAME.match(nvr)):
+            raise SRPMNotFoundError(f"Unexpected build name from Koji: {nvr!r}")
+        dest = self.download_dir / f"{nvr}.src.rpm"
 
-        nvr = build_info["nvr"]
-        name = build_info["name"]
-        ver = build_info["version"]
-        rel = build_info["release"]
+        if dest.is_file() and not dest.is_symlink():
+            if srpm_digest(dest) == digest:
+                logger.debug("Using cached %s", dest.name)
+                return str(dest)
+            logger.warning("Cached %s does not match Koji, downloading again", dest.name)
 
-        # Construct download URL
-        base_url = source.base_url.rstrip("/")
-        srpm_url = f"{base_url}/{name}/{ver}/{rel}/src/{nvr}.src.rpm"
-
-        download_path = self.download_dir / package_name
-        download_path.mkdir(parents=True, exist_ok=True)
-        dest = download_path / f"{nvr}.src.rpm"
-
-        if dest.exists():
-            return str(dest)
-
-        self._download_file(srpm_url, dest)
-
-        if not dest.exists():
-            raise SRPMNotFoundError(f"Failed to download SRPM from {srpm_url}")
-
+        url = f"{self.packages_url}/{build['name']}/{build['version']}/{build['release']}/src/"
+        self._download_verified(f"{url}{nvr}.src.rpm", dest, digest)
         return str(dest)
 
-    def _download_from_src(
-        self, package_name: str, version: Optional[str], source: SRPMSource
-    ) -> str:
-        """Download spec and sources from src.fedoraproject.org."""
-        if not HAS_REQUESTS:
-            raise VibeBuildError("requests library required for src.fedoraproject.org")
-
-        spec_url = (
-            f"{source.base_url}/{package_name}/raw/{self.fedora_release}/f/{package_name}.spec"
-        )
-
-        response = requests.get(spec_url, timeout=30, verify=not self.no_ssl_verify)
-        if response.status_code != 200:
-            raise SRPMNotFoundError(f"Spec not found at {spec_url}")
-
-        spec_content = response.text
-
-        work_dir = self.download_dir / package_name / "build"
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        spec_path = work_dir / f"{package_name}.spec"
-        spec_path.write_text(spec_content)
-
-        sources = self._extract_sources(spec_content)
-        sources_dir = work_dir / "SOURCES"
-        sources_dir.mkdir(exist_ok=True)
-
-        for source_file in sources:
-            if source_file.startswith(("http://", "https://", "ftp://")):
-                self._download_file(source_file, sources_dir / Path(source_file).name)
-            else:
-                lookaside_url = (
-                    f"https://src.fedoraproject.org/lookaside/pkgs/{package_name}/{source_file}"
-                )
-                try:
-                    self._download_file(lookaside_url, sources_dir / source_file)
-                except Exception:
-                    pass
-
-        result = subprocess.run(
-            [
-                "rpmbuild",
-                "-bs",
-                "--define",
-                f"_topdir {work_dir}",
-                "--define",
-                f"_sourcedir {sources_dir}",
-                "--define",
-                f"_srcrpmdir {work_dir}",
-                str(spec_path),
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            raise VibeBuildError(f"Failed to build SRPM: {result.stderr}")
-
-        srpms = list(work_dir.glob("*.src.rpm"))
-        if not srpms:
-            raise SRPMNotFoundError(f"No SRPM created for {package_name}")
-
-        return str(srpms[0])
-
-    def _extract_sources(self, spec_content: str) -> list[str]:
-        """Extract source URLs from spec content."""
-        sources = []
-        pattern = re.compile(r"^Source\d*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
-
-        for match in pattern.finditer(spec_content):
-            source = match.group(1).strip()
-            sources.append(source)
-
-        return sources
-
-    def _download_file(self, url: str, dest: Path) -> None:
-        """Download a file from URL."""
-        if not HAS_REQUESTS:
-            cmd = ["curl", "-L", "-o", str(dest), url]
-            if self.no_ssl_verify:
-                cmd.insert(1, "-k")
-            subprocess.run(cmd, check=True, timeout=300, env=self._get_env())
-            return
-
-        response = requests.get(url, stream=True, timeout=300, verify=not self.no_ssl_verify)
-        response.raise_for_status()
-
-        with open(dest, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-    def search_fedora_src(self, name: str) -> list[str]:
-        """
-        Search for packages in Fedora src.
-
-        Args:
-            name: Package name or pattern
-
-        Returns:
-            List of matching package names
-        """
-        if not HAS_REQUESTS:
-            result = subprocess.run(
-                [
-                    "koji",
-                    "--server=https://koji.fedoraproject.org/kojihub",
-                    "search",
-                    "package",
-                    f"*{name}*",
-                ],
-                capture_output=True,
-                text=True,
-                env=self._get_env(),
-            )
-            if result.returncode == 0:
-                return [line.strip() for line in result.stdout.strip().split("\n") if line]
-            return []
-
-        url = f"https://src.fedoraproject.org/api/0/projects?pattern=*{name}*&namespace=rpms"
-
+    def _download_verified(self, url: str, dest: Path, digest: str) -> None:
+        """Download into a temp file next to dest, check the digest, then move into place."""
+        fd, tmp_name = tempfile.mkstemp(prefix=".download-", dir=self.download_dir)
+        tmp = Path(tmp_name)
         try:
-            response = requests.get(url, timeout=30, verify=not self.no_ssl_verify)
-            if response.status_code == 200:
-                data = response.json()
-                return [p["name"] for p in data.get("projects", [])]
-        except Exception:
-            pass
+            with os.fdopen(fd, "wb") as f:
+                self._download_file(url, f)
+            actual = srpm_digest(tmp)
+            if actual != digest:
+                raise VibeBuildError(
+                    f"{dest.name} does not match Koji (got {actual}, expected {digest})"
+                )
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
 
-        return []
-
-    def get_package_versions(self, package_name: str) -> list[str]:
-        """Get available versions for a package."""
-        result = subprocess.run(
-            [
-                "koji",
-                "--server=https://koji.fedoraproject.org/kojihub",
-                "list-builds",
-                "--package",
-                package_name,
-                "--quiet",
-            ],
-            capture_output=True,
-            text=True,
-            env=self._get_env(),
-        )
-
-        versions = []
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if line:
-                    nvr = line.split()[0]
-                    parts = nvr.rsplit("-", 2)
-                    if len(parts) >= 2:
-                        versions.append(parts[-2])
-
-        return list(set(versions))
+    @with_retry(attempts=3, initial_delay=2.0, backoff=2.0)
+    def _download_file(self, url: str, out) -> None:
+        """Stream url into the open binary file `out`, at most MAX_SRPM_BYTES."""
+        if not url.startswith("https://"):
+            raise VibeBuildError(f"Refusing to download over plain HTTP: {url}")
+        out.seek(0)
+        out.truncate()
+        with requests.get(url, stream=True, timeout=300, verify=not self.no_ssl_verify) as r:
+            r.raise_for_status()
+            size = 0
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                size += len(chunk)
+                if size > MAX_SRPM_BYTES:
+                    raise VibeBuildError(f"{url} is larger than {MAX_SRPM_BYTES} bytes")
+                out.write(chunk)
 
     def clear_cache(self) -> None:
-        """Clear downloaded SRPM cache."""
-        self._cache.clear()
-
-    def cleanup(self) -> None:
-        """Remove all downloaded files."""
-        import shutil
-
-        if self.download_dir.exists():
-            shutil.rmtree(self.download_dir)
+        """Forget which names were already downloaded in this run."""
         self._cache.clear()

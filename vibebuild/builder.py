@@ -18,7 +18,7 @@ from vibebuild.exceptions import KojiBuildError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.name_resolver import PackageNameResolver
 from vibebuild.resolver import DependencyResolver, KojiClient
-from vibebuild.spec_patcher import patch_srpm
+from vibebuild.spec_patcher import cleanup_patched, patch_srpm
 from vibebuild.toolchain import detect_toolchains
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ class KojiBuilder:
         idempotent: bool = False,
         build_all_deps: bool = False,
         dest_tag: Optional[str] = None,
+        patch_specs: bool = False,
     ):
         self.koji_server = koji_server
         self.koji_web_url = koji_web_url
@@ -127,6 +128,7 @@ class KojiBuilder:
         self.force = force  # disable the idempotency skip
         self.idempotent = idempotent  # enable the idempotency pre-check (off by default)
         self.build_all_deps = build_all_deps
+        self.patch_specs = patch_specs  # strip %check / allow unpackaged files via local rpmbuild
 
         self.koji_client = KojiClient(
             server=koji_server,
@@ -231,26 +233,28 @@ class KojiBuilder:
         if not srpm_path.exists():
             raise FileNotFoundError(f"SRPM not found: {srpm_path}")
 
-        # By default patch the spec in all SRPMs before sending to koji: only
-        # strip %check (upstream testsuites require network/pid limits).
-        # The macro `_unpackaged_files_terminate_build 0` is not injected here
-        # by default, only on retry (see _build_and_retry_target /
-        # _retry_failed_with_macro).
+        # With patch_specs the spec loses %check (upstream testsuites may need network
+        # or process limits our buildroot lacks). The macro
+        # `_unpackaged_files_terminate_build 0` is added only on retry.
+        patched: Optional[str] = None
+        if self.patch_specs:
+            try:
+                patched = patch_srpm(str(srpm_path), add_unpackaged_macro=add_unpackaged_macro)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "spec patching skipped for %s: %s — using original SRPM",
+                    srpm_path.name,
+                    exc,
+                )
         try:
-            patched = patch_srpm(
-                str(srpm_path),
-                Path(self.fetcher.download_dir),
-                add_unpackaged_macro=add_unpackaged_macro,
-            )
-            srpm_path = Path(patched)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "spec patching skipped for %s: %s — using original SRPM",
-                srpm_path.name,
-                exc,
-            )
+            return self._submit_srpm(srpm_path, Path(patched) if patched else srpm_path, scratch)
+        finally:
+            if patched:
+                cleanup_patched(patched)
 
-        package_info = get_package_info_from_srpm(str(srpm_path))
+    def _submit_srpm(self, srpm_path: Path, upload: Path, scratch: bool) -> BuildTask:
+        """Submit `upload` (srpm_path itself or its patched copy) and track it as srpm_path."""
+        package_info = get_package_info_from_srpm(str(upload))
 
         task = BuildTask(
             package_name=package_info.name,
@@ -282,7 +286,7 @@ class KojiBuilder:
 
         try:
             task.task_id = self._submit_via_session(
-                srpm_path, package_info.name, self.dest_tag, scratch
+                upload, package_info.name, self.dest_tag, scratch
             )
         except KojiBuildError:
             task.status = BuildStatus.FAILED
@@ -359,9 +363,7 @@ class KojiBuilder:
                 return task
 
             task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
-            if task.status == BuildStatus.FAILED and self._task_has_unpackaged_files_error(
-                task.task_id
-            ):
+            if task.status == BuildStatus.FAILED and self._can_retry_unpackaged(task):
                 logger.info(
                     "  retrying %s with _unpackaged_files_terminate_build 0",
                     task.package_name,
@@ -767,6 +769,19 @@ class KojiBuilder:
 
         return result
 
+    def _can_retry_unpackaged(self, task: BuildTask) -> bool:
+        """True if a failed task hit unpackaged files and may be retried with the macro."""
+        if not self._task_has_unpackaged_files_error(task.task_id):
+            return False
+        if not self.patch_specs:
+            logger.info(
+                "  %s failed on unpackaged files; --patch-specs retries it with "
+                "_unpackaged_files_terminate_build 0",
+                task.package_name,
+            )
+            return False
+        return True
+
     def _retry_unpackaged_failures(self, level_tasks: list[BuildTask]) -> None:
         """For every FAILED task in the level: if the log has the unpackaged-files marker,
         retry the build once with `_unpackaged_files_terminate_build 0`.
@@ -778,7 +793,7 @@ class KojiBuilder:
         for task in level_tasks:
             if task.status != BuildStatus.FAILED or not task.task_id:
                 continue
-            if not self._task_has_unpackaged_files_error(task.task_id):
+            if not self._can_retry_unpackaged(task):
                 continue
             logger.info(
                 "  retrying %s with _unpackaged_files_terminate_build 0",

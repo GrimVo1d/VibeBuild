@@ -294,7 +294,18 @@ Examples:
         help="Build entire dependency graph locally, including packages available in Fedora repos",
     )
 
-    build_group.add_argument("--download-dir", metavar="DIR", help="Directory for downloaded SRPMs")
+    build_group.add_argument(
+        "--patch-specs",
+        action="store_true",
+        help="Rebuild SRPMs locally without %%check, and retry builds failing on unpackaged "
+        "files; runs rpmbuild on the spec (sandboxed with bwrap when available)",
+    )
+
+    build_group.add_argument(
+        "--download-dir",
+        metavar="DIR",
+        help="Directory for downloaded SRPMs (default: ~/.cache/vibebuild/srpms)",
+    )
 
     build_group.add_argument(
         "--no-name-resolution",
@@ -556,6 +567,7 @@ def cmd_build(
     force: bool = False,
     no_idempotency: bool = False,
     build_all_deps: bool = False,
+    patch_specs: bool = False,
 ) -> int:
     """Build package with dependency resolution."""
     srpm = Path(srpm_path)
@@ -591,6 +603,7 @@ def cmd_build(
         idempotent=not no_idempotency,
         build_all_deps=build_all_deps,
         dest_tag=dest_tag,
+        patch_specs=patch_specs,
     )
 
     if dry_run:
@@ -856,6 +869,7 @@ def main(args: Optional[list[str]] = None) -> int:
         force=getattr(opts, "force", False),
         no_idempotency=getattr(opts, "no_idempotency", False),
         build_all_deps=getattr(opts, "build_all_deps", False),
+        patch_specs=getattr(opts, "patch_specs", False),
     )
 
 

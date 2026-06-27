@@ -145,17 +145,6 @@ def mock_koji_session(mocker):
 
 
 @pytest.fixture
-def mock_requests(mocker):
-    """Mock requests library for testing HTTP calls."""
-    mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-    mock = mocker.patch("vibebuild.fetcher.requests")
-    mock.get.return_value.status_code = 200
-    mock.get.return_value.text = ""
-    mock.get.return_value.json.return_value = {}
-    return mock
-
-
-@pytest.fixture
 def temp_srpm(tmp_path, sample_spec_content):
     """Create a temporary SRPM-like file for testing."""
     srpm = tmp_path / "test-package-1.0-1.src.rpm"

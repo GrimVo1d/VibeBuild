@@ -329,6 +329,65 @@ class TestSubmitBuild:
                 builder._submit_build(str(srpm))
 
 
+class TestSpecPatchingOptIn:
+    """Specs are only patched (rpmbuild runs locally) when patch_specs is set."""
+
+    @pytest.fixture
+    def srpm(self, tmp_path):
+        path = tmp_path / "test-pkg-1.0-1.src.rpm"
+        path.write_text("fake srpm")
+        return path
+
+    @pytest.fixture(autouse=True)
+    def package_info(self):
+        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
+            mock_info.return_value = PackageInfo(
+                name="test-pkg", version="1.0", release="1", build_requires=[], source_urls=[]
+            )
+            yield mock_info
+
+    def test_not_patched_by_default(self, srpm, mock_koji_session):
+        with patch("vibebuild.builder.patch_srpm") as mock_patch:
+            KojiBuilder()._submit_build(str(srpm))
+
+        mock_patch.assert_not_called()
+        assert mock_koji_session.uploadWrapper.call_args.args[0] == str(srpm)
+
+    def test_patched_copy_is_uploaded_and_cleaned_up(self, srpm, tmp_path, mock_koji_session):
+        patched = tmp_path / "vibebuild-patch-x" / srpm.name
+        with (
+            patch("vibebuild.builder.patch_srpm", return_value=str(patched)) as mock_patch,
+            patch("vibebuild.builder.cleanup_patched") as mock_cleanup,
+        ):
+            task = KojiBuilder(patch_specs=True)._submit_build(str(srpm), add_unpackaged_macro=True)
+
+        mock_patch.assert_called_once_with(str(srpm), add_unpackaged_macro=True)
+        assert mock_koji_session.uploadWrapper.call_args.args[0] == str(patched)
+        mock_cleanup.assert_called_once_with(str(patched))
+        assert task.srpm_path == str(srpm)
+
+    def test_patched_copy_is_cleaned_up_when_submit_fails(self, srpm, mock_koji_session):
+        mock_koji_session.build.side_effect = koji.GenericError("boom")
+        with (
+            patch("vibebuild.builder.patch_srpm", return_value="/tmp/p/x.src.rpm"),
+            patch("vibebuild.builder.cleanup_patched") as mock_cleanup,
+        ):
+            with pytest.raises(KojiBuildError):
+                KojiBuilder(patch_specs=True)._submit_build(str(srpm))
+
+        mock_cleanup.assert_called_once_with("/tmp/p/x.src.rpm")
+
+    def test_patch_failure_falls_back_to_original(self, srpm, mock_koji_session):
+        with (
+            patch("vibebuild.builder.patch_srpm", side_effect=RuntimeError("no rpmbuild")),
+            patch("vibebuild.builder.cleanup_patched") as mock_cleanup,
+        ):
+            KojiBuilder(patch_specs=True)._submit_build(str(srpm))
+
+        assert mock_koji_session.uploadWrapper.call_args.args[0] == str(srpm)
+        mock_cleanup.assert_not_called()
+
+
 class TestPollBuilds:
     # koji task state codes: 2=closed, 3=canceled, 5=failed, 1=open.
     _CLOSED = {"state": 2}
@@ -1073,7 +1132,7 @@ class TestUnpackagedFilesRetry:
     ):
         srpm = tmp_path / "pkg.src.rpm"
         srpm.write_text("fake")
-        builder = KojiBuilder()
+        builder = KojiBuilder(patch_specs=True)
 
         first = BuildTask(
             "pkg", str(srpm), "fedora-target", task_id=11, status=BuildStatus.BUILDING
@@ -1122,7 +1181,7 @@ class TestUnpackagedFilesRetry:
     def test_retry_unpackaged_failures_swaps_task_on_success(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "dep.src.rpm"
         srpm.write_text("fake")
-        builder = KojiBuilder()
+        builder = KojiBuilder(patch_specs=True)
         failed_task = BuildTask(
             "dep", str(srpm), "fedora-target", task_id=42, status=BuildStatus.FAILED
         )
@@ -1142,6 +1201,23 @@ class TestUnpackagedFilesRetry:
         mock_submit.assert_called_once_with(str(srpm), add_unpackaged_macro=True)
         assert failed_task.task_id == 43
         assert failed_task.status == BuildStatus.COMPLETE
+
+    def test_no_retry_without_patch_specs(self, tmp_path, mock_koji_session, caplog):
+        caplog.set_level("INFO", logger="vibebuild.builder")
+        srpm = tmp_path / "dep.src.rpm"
+        srpm.write_text("fake")
+        builder = KojiBuilder()
+        failed_task = BuildTask(
+            "dep", str(srpm), "fedora-target", task_id=42, status=BuildStatus.FAILED
+        )
+
+        with patch.object(builder, "_task_has_unpackaged_files_error", return_value=True):
+            with patch.object(builder, "_submit_build") as mock_submit:
+                builder._retry_unpackaged_failures([failed_task])
+
+        mock_submit.assert_not_called()
+        assert failed_task.status == BuildStatus.FAILED
+        assert "--patch-specs" in caplog.text
 
     def test_retry_unpackaged_failures_skips_when_marker_absent(self, tmp_path, mock_koji_session):
         srpm = tmp_path / "dep.src.rpm"

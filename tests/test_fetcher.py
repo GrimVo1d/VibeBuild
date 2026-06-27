@@ -1,672 +1,281 @@
 """Tests for vibebuild.fetcher module."""
 
-from unittest.mock import MagicMock, Mock, patch
+import hashlib
+import stat
+import struct
+from unittest.mock import MagicMock
 
+import koji
 import pytest
 
-from vibebuild.exceptions import SRPMNotFoundError
-from vibebuild.fetcher import SRPMFetcher, SRPMSource
+from vibebuild import fetcher
+from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
+from vibebuild.fetcher import SRPMFetcher, default_download_dir, srpm_digest
+
+BUILD = {
+    "build_id": 42,
+    "name": "PyYAML",
+    "version": "6.0.3",
+    "release": "6.fc45",
+    "nvr": "PyYAML-6.0.3-6.fc45",
+}
+URL = "https://kojipkgs.fedoraproject.org/packages/PyYAML/6.0.3/6.fc45/src/PyYAML-6.0.3-6.fc45.src.rpm"
 
 
-class TestSRPMSource:
-    def test_default_values(self):
-        source = SRPMSource(name="test", base_url="https://example.internal")
+@pytest.fixture
+def hub(mocker):
+    """The anonymous Fedora Koji session: PyYAML is the only package it knows."""
+    session = MagicMock()
+    session.getBuildTarget.return_value = {"build_tag_name": "f46-build"}
+    session.getLatestBuilds.side_effect = lambda tag, package: (
+        [BUILD] if package == "PyYAML" else []
+    )
+    session.getBuild.return_value = BUILD
+    session.listRPMs.return_value = [{"arch": "src", "payloadhash": "good"}]
+    mocker.patch("vibebuild.fetcher.koji.ClientSession", return_value=session)
+    return session
 
-        assert source.name == "test"
-        assert source.base_url == "https://example.internal"
-        assert source.koji_server is None
-        assert source.priority == 100
 
-    def test_with_all_values(self):
-        source = SRPMSource(
-            name="fedora",
-            base_url="https://koji.fedoraproject.org",
-            koji_server="https://koji.fedoraproject.org/kojihub",
-            priority=10,
+@pytest.fixture
+def http(mocker):
+    """requests.get streaming a small body."""
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.iter_content.return_value = [b"srpm ", b"bytes"]
+    return mocker.patch("vibebuild.fetcher.requests.get", return_value=response)
+
+
+@pytest.fixture
+def digest(mocker):
+    """srpm_digest: every file reads as the digest Koji recorded."""
+    return mocker.patch("vibebuild.fetcher.srpm_digest", return_value="good")
+
+
+class TestDownloadDir:
+    def test_default_dir_follows_xdg_cache_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+        assert default_download_dir() == tmp_path / "vibebuild" / "srpms"
+
+    def test_default_dir_is_private(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+        f = SRPMFetcher()
+
+        assert f.download_dir == tmp_path / "vibebuild" / "srpms"
+        assert stat.S_IMODE(f.download_dir.stat().st_mode) == 0o700
+
+    def test_explicit_dir_is_created(self, tmp_path):
+        f = SRPMFetcher(download_dir=str(tmp_path / "a" / "b"))
+
+        assert f.download_dir.is_dir()
+
+
+class TestDownloadSrpm:
+    def test_downloads_latest_rawhide_build(self, tmp_path, hub, http, digest):
+        path = SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+        assert path == str(tmp_path / "PyYAML-6.0.3-6.fc45.src.rpm")
+        assert (tmp_path / "PyYAML-6.0.3-6.fc45.src.rpm").read_bytes() == b"srpm bytes"
+        hub.getLatestBuilds.assert_called_once_with("f46-build", package="PyYAML")
+        hub.listRPMs.assert_called_once_with(buildID=42, arches="src")
+        assert http.call_args.args[0] == URL
+        assert list(tmp_path.glob(".download-*")) == []
+
+    def test_release_looks_in_updates_first(self, tmp_path, hub, http, digest):
+        SRPMFetcher(download_dir=str(tmp_path), fedora_release="44").download_srpm("PyYAML")
+
+        hub.getLatestBuilds.assert_called_once_with("f44-updates", package="PyYAML")
+
+    def test_release_falls_back_to_ga_tag(self, tmp_path, hub, http, digest):
+        hub.getLatestBuilds.side_effect = lambda tag, package: [] if "updates" in tag else [BUILD]
+
+        SRPMFetcher(download_dir=str(tmp_path), fedora_release="f44").download_srpm("PyYAML")
+
+        assert [c.args[0] for c in hub.getLatestBuilds.call_args_list] == ["f44-updates", "f44"]
+
+    def test_unknown_tag_is_skipped(self, tmp_path, hub, http, digest):
+        def latest(tag, package):
+            if "updates" in tag:
+                raise koji.GenericError("No such tag")
+            return [BUILD]
+
+        hub.getLatestBuilds.side_effect = latest
+
+        SRPMFetcher(download_dir=str(tmp_path), fedora_release="44").download_srpm("PyYAML")
+
+    def test_specific_version(self, tmp_path, hub, http, digest):
+        SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML", version="6.0.3-6.fc45")
+
+        hub.getBuild.assert_called_once_with("PyYAML-6.0.3-6.fc45")
+        hub.getLatestBuilds.assert_not_called()
+
+    def test_digest_mismatch_fails_and_leaves_nothing(self, tmp_path, hub, http, digest):
+        digest.return_value = "evil"
+
+        with pytest.raises(VibeBuildError, match="does not match Koji"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_cached_file_is_reused_when_digest_matches(self, tmp_path, hub, http, digest):
+        (tmp_path / "PyYAML-6.0.3-6.fc45.src.rpm").write_bytes(b"cached")
+
+        SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+        http.assert_not_called()
+
+    def test_stale_cached_file_is_replaced(self, tmp_path, hub, http, digest):
+        cached = tmp_path / "PyYAML-6.0.3-6.fc45.src.rpm"
+        cached.write_bytes(b"stale")
+        digest.side_effect = lambda path: "stale" if path.read_bytes() == b"stale" else "good"
+
+        SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+        assert cached.read_bytes() == b"srpm bytes"
+
+    def test_symlink_in_cache_is_not_trusted(self, tmp_path, hub, http, digest):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.write_bytes(b"other")
+        (tmp_path / "PyYAML-6.0.3-6.fc45.src.rpm").symlink_to(elsewhere)
+
+        SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+        http.assert_called_once()
+        assert elsewhere.read_bytes() == b"other"
+
+    def test_repeat_download_uses_memory_cache(self, tmp_path, hub, http, digest):
+        f = SRPMFetcher(download_dir=str(tmp_path))
+        f.download_srpm("PyYAML")
+        f.download_srpm("PyYAML")
+
+        assert hub.listRPMs.call_count == 1
+        f.clear_cache()
+        f.download_srpm("PyYAML")
+        assert hub.listRPMs.call_count == 2
+
+    def test_tries_name_resolver_candidates(self, tmp_path, hub, http, digest):
+        resolver = MagicMock()
+        resolver.get_download_candidates.return_value = ["python-pyyaml", "PyYAML"]
+
+        path = SRPMFetcher(download_dir=str(tmp_path), name_resolver=resolver).download_srpm(
+            "python3-pyyaml"
         )
 
-        assert source.koji_server == "https://koji.fedoraproject.org/kojihub"
-        assert source.priority == 10
-
-
-class TestSRPMFetcher:
-    def test_default_initialization(self, tmp_path):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        assert fetcher.download_dir == tmp_path
-        assert len(fetcher.sources) == 2
-        assert fetcher.fedora_release == "rawhide"
-        assert fetcher._cache == {}
-
-    def test_custom_sources(self, tmp_path):
-        custom_sources = [
-            SRPMSource(name="custom", base_url="https://custom.internal", priority=5)
-        ]
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), sources=custom_sources)
-
-        assert len(fetcher.sources) == 1
-        assert fetcher.sources[0].name == "custom"
-
-    def test_sources_sorted_by_priority(self, tmp_path):
-        sources = [
-            SRPMSource(name="low-priority", base_url="https://low.internal", priority=100),
-            SRPMSource(name="high-priority", base_url="https://high.internal", priority=10),
-        ]
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), sources=sources)
-
-        assert fetcher.sources[0].name == "high-priority"
-        assert fetcher.sources[1].name == "low-priority"
-
-    def test_download_dir_created(self, tmp_path):
-        download_dir = tmp_path / "new_dir"
-        assert not download_dir.exists()
-
-        SRPMFetcher(download_dir=str(download_dir))
-
-        assert download_dir.exists()
-
-    def test_download_srpm_returns_cached(self, tmp_path, mock_subprocess_run):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        cached_path = tmp_path / "cached.src.rpm"
-        cached_path.write_text("cached srpm")
-        fetcher._cache["test-pkg-latest"] = str(cached_path)
-
-        result = fetcher.download_srpm("test-pkg")
-
-        assert result == str(cached_path)
-        mock_subprocess_run.assert_not_called()
-
-    def test_download_srpm_cache_miss_if_file_deleted(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher._cache["test-pkg-latest"] = "/nonexistent/path.src.rpm"
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = [
-            {
-                "nvr": "test-pkg-1.0-1.fc40",
-                "name": "test-pkg",
-                "version": "1.0",
-                "release": "1.fc40",
-            }
-        ]
-        pkg_dir = tmp_path / "test-pkg"
-        pkg_dir.mkdir()
-        srpm_file = pkg_dir / "test-pkg-1.0-1.fc40.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        result = fetcher.download_srpm("test-pkg")
-
-        assert result == str(srpm_file)
-
-    def test_download_srpm_from_koji_with_version(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuild.return_value = {
-            "nvr": "test-pkg-1.0-1.fc40",
-            "name": "test-pkg",
-            "version": "1.0",
-            "release": "1.fc40",
-        }
-        pkg_dir = tmp_path / "test-pkg"
-        pkg_dir.mkdir()
-        srpm_file = pkg_dir / "test-pkg-1.0-1.fc40.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        result = fetcher.download_srpm("test-pkg", version="1.0-1.fc40")
-
-        assert "test-pkg" in result
-        assert result.endswith(".src.rpm")
-
-    def test_download_srpm_from_koji_latest(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = [
-            {
-                "nvr": "test-pkg-2.0-1.fc42",
-                "name": "test-pkg",
-                "version": "2.0",
-                "release": "1.fc42",
-            }
-        ]
-        pkg_dir = tmp_path / "test-pkg"
-        pkg_dir.mkdir()
-        srpm_file = pkg_dir / "test-pkg-2.0-1.fc42.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        result = fetcher.download_srpm("test-pkg")
-
-        assert result == str(srpm_file)
-
-    def test_download_srpm_fallback_to_rawhide(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        # First call (f42 tag) returns empty, second call (rawhide) returns build
-        mock_server.getLatestBuilds.side_effect = [
-            [],  # f42 tag
-            [
-                {
-                    "nvr": "test-pkg-3.0-1.fc42",
-                    "name": "test-pkg",
-                    "version": "3.0",
-                    "release": "1.fc42",
-                }
-            ],  # rawhide
-        ]
-        pkg_dir = tmp_path / "test-pkg"
-        pkg_dir.mkdir()
-        srpm_file = pkg_dir / "test-pkg-3.0-1.fc42.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        result = fetcher.download_srpm("test-pkg")
-
-        assert result == str(srpm_file)
-
-    def test_download_srpm_raises_not_found(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = []
-
-        with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
-            fetcher.download_srpm("nonexistent-pkg")
-
-    def test_download_srpm_no_srpm_after_download(self, tmp_path, mocker):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = [
-            {
-                "nvr": "test-pkg-1.0-1.fc40",
-                "name": "test-pkg",
-                "version": "1.0",
-                "release": "1.fc40",
-            }
-        ]
-        mocker.patch.object(fetcher, "_download_file")
-        pkg_dir = tmp_path / "test-pkg"
-        pkg_dir.mkdir()
-        # Don't create the srpm file - simulates download failure
-
-        with pytest.raises(SRPMNotFoundError, match="Failed to download SRPM"):
-            fetcher.download_srpm("test-pkg")
-
-    def test_search_fedora_src_success(self, tmp_path, mocker):
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.json.return_value = {
-            "projects": [{"name": "python3"}, {"name": "python3-devel"}, {"name": "python3-libs"}]
-        }
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.search_fedora_src("python3")
-
-        assert "python3" in result
-        assert "python3-devel" in result
-
-    def test_search_fedora_src_no_results(self, tmp_path, mocker):
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.json.return_value = {"projects": []}
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.search_fedora_src("nonexistent")
-
-        assert result == []
-
-    def test_get_package_versions_success(self, tmp_path, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = """python3-3.11.0-1.fc40
-python3-3.10.0-1.fc39
-python3-3.9.0-1.fc38
-"""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.get_package_versions("python3")
-
-        assert "3.11.0" in result
-        assert "3.10.0" in result
-        assert "3.9.0" in result
-
-    def test_get_package_versions_no_results(self, tmp_path, mock_subprocess_run):
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stdout = ""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.get_package_versions("nonexistent")
-
-        assert result == []
-
-    def test_clear_cache(self, tmp_path):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher._cache["pkg1"] = "/path/to/pkg1.src.rpm"
-        fetcher._cache["pkg2"] = "/path/to/pkg2.src.rpm"
-
-        fetcher.clear_cache()
-
-        assert fetcher._cache == {}
-
-    def test_cleanup_removes_directory(self, tmp_path):
-        download_dir = tmp_path / "to_cleanup"
-        download_dir.mkdir()
-        (download_dir / "some_file.txt").write_text("test")
-        fetcher = SRPMFetcher(download_dir=str(download_dir))
-        fetcher._cache["test"] = "value"
-
-        fetcher.cleanup()
-
-        assert not download_dir.exists()
-        assert fetcher._cache == {}
-
-
-class TestSRPMFetcherWithRequests:
-    @pytest.fixture
-    def mock_requests(self, mocker):
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock = mocker.patch("vibebuild.fetcher.requests")
-        mock.get.return_value.status_code = 200
-        return mock
-
-    def test_download_from_src_success(self, tmp_path, mock_subprocess_run, mock_requests):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = """
-Name: test-pkg
-Version: 1.0
-Release: 1
-Source0: test-pkg-1.0.tar.gz
-"""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = ""
-        work_dir = tmp_path / "test-pkg" / "build"
-        work_dir.mkdir(parents=True)
-        srpm_file = work_dir / "test-pkg-1.0-1.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        with patch.object(fetcher, "_download_file"):
-            with patch("vibebuild.fetcher.Path.glob") as mock_glob:
-                mock_glob.return_value = [srpm_file]
-                result = fetcher.download_srpm("test-pkg")
-
-        assert "test-pkg" in result
-
-    def test_download_from_src_spec_not_found(self, tmp_path, mock_requests):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_requests.get.return_value.status_code = 404
-
-        with pytest.raises(SRPMNotFoundError):
-            fetcher.download_srpm("nonexistent-pkg")
-
-    def test_search_fedora_src_with_requests(self, tmp_path, mock_requests):
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.json.return_value = {
-            "projects": [{"name": "python3"}, {"name": "python3-devel"}]
-        }
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.search_fedora_src("python3")
-
-        assert "python3" in result
-        assert "python3-devel" in result
-
-
-class TestSRPMFetcherExtractSources:
-    def test_extract_sources_from_spec(self, tmp_path):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        spec_content = """
-Name: test
-Version: 1.0
-Source0: https://example.internal/test-1.0.tar.gz
-Source1: test-config.conf
-Source2: https://cdn.internal/patches/patch1.diff
-"""
-
-        result = fetcher._extract_sources(spec_content)
-
-        assert "https://example.internal/test-1.0.tar.gz" in result
-        assert "test-config.conf" in result
-        assert "https://cdn.internal/patches/patch1.diff" in result
-
-    def test_extract_sources_empty(self, tmp_path):
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        spec_content = """
-Name: test
-Version: 1.0
-"""
-
-        result = fetcher._extract_sources(spec_content)
-
-        assert result == []
-
-
-class TestSRPMFetcherGetEnv:
-    def test_get_env_with_no_ssl_verify(self, tmp_path):
-        """_get_env with no_ssl_verify=True should set SSL env vars."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), no_ssl_verify=True)
-
-        env = fetcher._get_env()
-
-        assert env is not None
-        assert env["PYTHONHTTPSVERIFY"] == "0"
-        assert env["REQUESTS_CA_BUNDLE"] == ""
-        assert env["CURL_CA_BUNDLE"] == ""
-
-    def test_get_env_without_no_ssl_verify(self, tmp_path):
-        """_get_env without no_ssl_verify should return None."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), no_ssl_verify=False)
-
-        env = fetcher._get_env()
-
-        assert env is None
-
-
-class TestSRPMFetcherDownloadWithNameResolver:
-    def test_download_srpm_with_name_resolver(self, tmp_path, mocker):
-        """download_srpm with name_resolver should try multiple candidates."""
-        mock_resolver = Mock()
-        mock_resolver.get_download_candidates.return_value = ["python-requests", "python3-requests"]
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), name_resolver=mock_resolver)
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuild.return_value = {
-            "nvr": "python-requests-2.0-1",
-            "name": "python-requests",
-            "version": "2.0",
-            "release": "1",
-        }
-        pkg_dir = tmp_path / "python-requests"
-        pkg_dir.mkdir()
-        srpm_file = pkg_dir / "python-requests-2.0-1.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        result = fetcher.download_srpm("python-requests", version="2.0-1")
-
-        assert "python-requests" in result
-        mock_resolver.get_download_candidates.assert_called_once_with("python-requests")
-
-
-class TestSRPMFetcherKojiEdgeCases:
-    def test_koji_connection_error(self, tmp_path, mocker):
-        """Connection error when connecting to Koji XML-RPC."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(
-                name="koji",
-                base_url="https://koji.internal",
-                koji_server="https://koji.internal/kojihub",
-                priority=1,
-            )
-        ]
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.side_effect = Exception("connection refused")
-        mock_server.getTag.side_effect = Exception("connection refused")
-        mock_server.getLatestBuilds.side_effect = Exception("connection refused")
-
-        with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
-            fetcher.download_srpm("test-pkg")
-
-    def test_koji_package_not_found(self, tmp_path, mocker):
-        """Koji returns empty builds for package."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(
-                name="koji",
-                base_url="https://koji.internal",
-                koji_server="https://koji.internal/kojihub",
-                priority=1,
-            )
-        ]
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = []
-
-        with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
-            fetcher.download_srpm("test-pkg")
-
-    def test_download_file_failure(self, tmp_path, mocker):
-        """Download failure should raise."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(
-                name="koji",
-                base_url="https://koji.internal",
-                koji_server="https://koji.internal/kojihub",
-                priority=1,
-            )
-        ]
-        mock_server = MagicMock()
-        mocker.patch("xmlrpc.client.ServerProxy", return_value=mock_server)
-        mock_server.getBuildTarget.return_value = {"dest_tag_name": "f42"}
-        mock_server.getLatestBuilds.return_value = [
-            {
-                "nvr": "test-pkg-1.0-1.fc40",
-                "name": "test-pkg",
-                "version": "1.0",
-                "release": "1.fc40",
-            }
-        ]
-        mocker.patch.object(fetcher, "_download_file", side_effect=Exception("download error"))
-
-        with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
-            fetcher.download_srpm("test-pkg")
-
-
-class TestSRPMFetcherSrcEdgeCases:
-    def test_http_source_url_in_spec(self, tmp_path, mock_subprocess_run, mocker):
-        """HTTP source URLs should be downloaded directly."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = (
-            "Name: test\nVersion: 1.0\nRelease: 1\nSource0: https://example.internal/test-1.0.tar.gz\n"
-        )
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_subprocess_run.return_value.returncode = 0
-        work_dir = tmp_path / "test" / "build"
-        work_dir.mkdir(parents=True)
-        srpm_file = work_dir / "test-1.0-1.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        with patch.object(fetcher, "_download_file"):
-            with patch("vibebuild.fetcher.Path.glob") as mock_glob:
-                mock_glob.return_value = [srpm_file]
-                result = fetcher.download_srpm("test")
-
-        assert "test" in result
-
-    def test_lookaside_exception_passes(self, tmp_path, mock_subprocess_run, mocker):
-        """Lookaside download exception should be silently ignored."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = (
-            "Name: test\nVersion: 1.0\nRelease: 1\nSource0: local-file.tar.gz\n"
-        )
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_subprocess_run.return_value.returncode = 0
-        work_dir = tmp_path / "test" / "build"
-        work_dir.mkdir(parents=True)
-        srpm_file = work_dir / "test-1.0-1.src.rpm"
-        srpm_file.write_text("fake srpm")
-
-        with patch.object(fetcher, "_download_file", side_effect=Exception("download failed")):
-            with patch("vibebuild.fetcher.Path.glob") as mock_glob:
-                mock_glob.return_value = [srpm_file]
-                result = fetcher.download_srpm("test")
-
-        assert "test" in result
-
-    def test_rpmbuild_failure(self, tmp_path, mock_subprocess_run, mocker):
-        """rpmbuild failure should raise VibeBuildError."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = "Name: test\nVersion: 1.0\nRelease: 1\n"
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_subprocess_run.return_value.returncode = 1
-        mock_subprocess_run.return_value.stderr = "rpmbuild error"
-
-        with pytest.raises(SRPMNotFoundError):
-            fetcher.download_srpm("test")
-
-    def test_no_srpm_after_rpmbuild(self, tmp_path, mock_subprocess_run, mocker):
-        """No SRPM after rpmbuild should raise SRPMNotFoundError."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 200
-        mock_requests.get.return_value.text = "Name: test\nVersion: 1.0\nRelease: 1\n"
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = [
-            SRPMSource(name="fedora-src", base_url="https://src.fedoraproject.org/rpms", priority=1)
-        ]
-        mock_subprocess_run.return_value.returncode = 0
-
-        with pytest.raises(SRPMNotFoundError):
-            fetcher.download_srpm("test")
-
-
-class TestSRPMFetcherDownloadFile:
-    def test_download_file_without_requests_curl(self, tmp_path, mock_subprocess_run, mocker):
-        """_download_file without requests should use curl."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", False)
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_subprocess_run.return_value.returncode = 0
-
-        fetcher._download_file("https://example.internal/file.tar.gz", tmp_path / "file.tar.gz")
-
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "curl" in call_args
-        assert "-L" in call_args
-
-    def test_download_file_without_requests_curl_ssl(self, tmp_path, mock_subprocess_run, mocker):
-        """_download_file without requests + no_ssl_verify should use curl -k."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", False)
-        fetcher = SRPMFetcher(download_dir=str(tmp_path), no_ssl_verify=True)
-        mock_subprocess_run.return_value.returncode = 0
-
-        fetcher._download_file("https://example.internal/file.tar.gz", tmp_path / "file.tar.gz")
-
-        call_args = mock_subprocess_run.call_args[0][0]
-        assert "-k" in call_args
-
-    def test_download_file_with_requests(self, tmp_path, mocker):
-        """_download_file with requests should use requests.get."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_response = Mock()
-        mock_response.iter_content.return_value = [b"data"]
-        mock_requests.get.return_value = mock_response
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        dest = tmp_path / "file.tar.gz"
-
-        fetcher._download_file("https://example.internal/file.tar.gz", dest)
-
-        mock_requests.get.assert_called_once()
-        assert dest.exists()
-
-
-class TestSRPMFetcherDownloadEmptySources:
-    def test_download_srpm_empty_sources_no_errors(self, tmp_path, mock_subprocess_run):
-        """download_srpm with empty sources list should raise without error details."""
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        fetcher.sources = []  # Override after init (empty list is falsy in constructor)
-
-        with pytest.raises(SRPMNotFoundError, match="Could not find SRPM"):
-            fetcher.download_srpm("test-pkg")
-
-
-class TestSRPMFetcherGetPackageVersionsEdgeCases:
-    def test_get_package_versions_empty_lines_and_no_hyphen(self, tmp_path, mock_subprocess_run):
-        """get_package_versions with empty lines and names without hyphen."""
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3-3.11.0-1.fc40\n\nsimplename\n"
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.get_package_versions("python3")
-
-        assert "3.11.0" in result
-
-
-class TestSRPMFetcherCleanupEdgeCases:
-    def test_cleanup_nonexistent_dir(self, tmp_path):
-        """cleanup should handle non-existing download_dir."""
-        download_dir = tmp_path / "nonexistent"
-        fetcher = SRPMFetcher.__new__(SRPMFetcher)
-        fetcher.download_dir = download_dir
-        fetcher._cache = {"test": "value"}
-
-        fetcher.cleanup()
-
-        assert fetcher._cache == {}
-
-
-class TestSearchFedoraSrcEdgeCases:
-    def test_search_without_requests_uses_koji(self, tmp_path, mock_subprocess_run, mocker):
-        """search_fedora_src without requests should use koji CLI."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", False)
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "python3\npython3-devel\n"
-
-        result = fetcher.search_fedora_src("python3")
-
-        assert "python3" in result
-        assert "python3-devel" in result
-
-    def test_search_without_requests_koji_failure(self, tmp_path, mock_subprocess_run, mocker):
-        """search_fedora_src without requests should return [] on failure."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", False)
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-        mock_subprocess_run.return_value.returncode = 1
-
-        result = fetcher.search_fedora_src("nonexistent")
-
-        assert result == []
-
-    def test_search_with_requests_exception(self, tmp_path, mocker):
-        """search_fedora_src with requests should return [] on exception."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.side_effect = Exception("connection error")
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.search_fedora_src("python3")
-
-        assert result == []
-
-    def test_search_with_requests_non_200(self, tmp_path, mocker):
-        """search_fedora_src with non-200 status should return []."""
-        mocker.patch("vibebuild.fetcher.HAS_REQUESTS", True)
-        mock_requests = mocker.patch("vibebuild.fetcher.requests")
-        mock_requests.get.return_value.status_code = 500
-        fetcher = SRPMFetcher(download_dir=str(tmp_path))
-
-        result = fetcher.search_fedora_src("python3")
-
-        assert result == []
+        assert path.endswith("PyYAML-6.0.3-6.fc45.src.rpm")
+
+    def test_not_found(self, tmp_path, hub, http, digest):
+        with pytest.raises(SRPMNotFoundError, match=r"tried: \['nope'\]"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("nope")
+
+    def test_unsafe_name_is_rejected_before_koji(self, tmp_path, hub, http, digest):
+        with pytest.raises(SRPMNotFoundError, match="Invalid package name"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("../etc/passwd")
+
+        hub.getLatestBuilds.assert_not_called()
+
+    def test_unsafe_nvr_from_koji_is_rejected(self, tmp_path, hub, http, digest):
+        hub.getLatestBuilds.side_effect = None
+        hub.getLatestBuilds.return_value = [dict(BUILD, nvr="../../x")]
+
+        with pytest.raises(SRPMNotFoundError, match="Unexpected build name"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+    def test_build_without_srpm(self, tmp_path, hub, http, digest):
+        hub.listRPMs.return_value = []
+
+        with pytest.raises(SRPMNotFoundError, match="has no SRPM"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+    def test_koji_error_is_not_found(self, tmp_path, hub, http, digest):
+        hub.getBuildTarget.side_effect = OSError("Connection refused")
+
+        with pytest.raises(SRPMNotFoundError, match="Koji lookup for PyYAML failed"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+    def test_rawhide_target_missing(self, tmp_path, hub, http, digest):
+        hub.getBuildTarget.return_value = None
+
+        with pytest.raises(SRPMNotFoundError, match="no rawhide target"):
+            SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
+
+    def test_no_ssl_verify(self, tmp_path, hub, http, digest, mocker):
+        cls = mocker.patch("vibebuild.fetcher.koji.ClientSession", return_value=hub)
+
+        SRPMFetcher(download_dir=str(tmp_path), no_ssl_verify=True).download_srpm("PyYAML")
+
+        assert cls.call_args.kwargs["opts"]["no_ssl_verify"] is True
+        assert http.call_args.kwargs["verify"] is False
+
+
+class TestDownloadFile:
+    def test_refuses_plain_http(self, tmp_path, http):
+        f = SRPMFetcher(download_dir=str(tmp_path))
+
+        with pytest.raises(VibeBuildError, match="plain HTTP"):
+            with open(tmp_path / "out", "wb") as out:
+                f._download_file("http://example.internal/x.src.rpm", out)
+
+        http.assert_not_called()
+
+    def test_size_limit(self, tmp_path, http, monkeypatch):
+        monkeypatch.setattr(fetcher, "MAX_SRPM_BYTES", 6)
+        f = SRPMFetcher(download_dir=str(tmp_path))
+
+        with pytest.raises(VibeBuildError, match="larger than 6 bytes"):
+            with open(tmp_path / "out", "wb") as out:
+                f._download_file(URL, out)
+
+    def test_transient_error_is_retried(self, tmp_path, http):
+        ok = http.return_value
+        http.side_effect = [ConnectionError("Connection reset"), ok]
+        f = SRPMFetcher(download_dir=str(tmp_path))
+
+        with open(tmp_path / "out", "wb") as out:
+            f._download_file(URL, out)
+
+        assert (tmp_path / "out").read_bytes() == b"srpm bytes"
+        assert http.call_count == 2
+
+
+def _rpm(header_and_payload: bytes, signature: bytes = b"sig") -> bytes:
+    """A minimal RPM: lead, signature header with one entry, header and payload."""
+    lead = b"\xed\xab\xee\xdb" + bytes(92)
+    sig = b"\x8e\xad\xe8\x01" + bytes(4) + struct.pack(">II", 1, len(signature))
+    sig += bytes(16) + signature
+    return lead + sig + bytes(-len(signature) % 8) + header_and_payload
+
+
+class TestSrpmDigest:
+    def test_md5_of_header_and_payload(self, tmp_path):
+        path = tmp_path / "x.src.rpm"
+        path.write_bytes(_rpm(b"header and payload"))
+
+        assert srpm_digest(path) == hashlib.md5(b"header and payload").hexdigest()
+
+    def test_signature_header_does_not_count(self, tmp_path):
+        a, b = tmp_path / "a.src.rpm", tmp_path / "b.src.rpm"
+        a.write_bytes(_rpm(b"same", signature=b"one"))
+        b.write_bytes(_rpm(b"same", signature=b"another signature"))
+
+        assert srpm_digest(a) == srpm_digest(b)
+
+    def test_appended_bytes_change_the_digest(self, tmp_path):
+        path = tmp_path / "x.src.rpm"
+        path.write_bytes(_rpm(b"payload"))
+        before = srpm_digest(path)
+        with path.open("ab") as f:
+            f.write(b"x")
+
+        assert srpm_digest(path) != before
+
+    def test_not_an_rpm(self, tmp_path):
+        path = tmp_path / "x.src.rpm"
+        path.write_bytes(b"<html>404</html>")
+
+        with pytest.raises(VibeBuildError, match="Not an RPM file"):
+            srpm_digest(path)
+
+    def test_unreadable(self, tmp_path):
+        with pytest.raises(VibeBuildError, match="Cannot read"):
+            srpm_digest(tmp_path / "missing.src.rpm")
