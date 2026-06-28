@@ -15,7 +15,6 @@ import importlib
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +107,7 @@ def collect_and_train(
     release: int,
     arch: str,
     output: str,
-    raw_path: Optional[str] = None,
+    raw_path: str | None = None,
     keep_raw: bool = False,
     test_split: float = 0.05,
     eval_sample: int = 500,

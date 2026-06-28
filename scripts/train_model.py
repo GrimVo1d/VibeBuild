@@ -47,7 +47,7 @@ def load_training_data(path: str) -> list[dict]:
     if not data_path.exists():
         raise FileNotFoundError(f"Training data file not found: {path}")
 
-    with open(data_path, "r", encoding="utf-8") as f:
+    with open(data_path, encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, list):
@@ -56,7 +56,7 @@ def load_training_data(path: str) -> list[dict]:
     # Merge alias training data (e.g. python3 -> python3.12) if present
     alias_path = PROJECT_ROOT / "vibebuild" / "data" / "alias_training.json"
     if alias_path.exists():
-        with open(alias_path, "r", encoding="utf-8") as f:
+        with open(alias_path, encoding="utf-8") as f:
             aliases = json.load(f)
         if isinstance(aliases, list):
             data = data + aliases

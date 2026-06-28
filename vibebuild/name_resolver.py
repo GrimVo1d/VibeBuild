@@ -7,7 +7,7 @@ perl(File::Path)) to real RPM package names, and maps RPM names to possible SRPM
 
 import logging
 import re
-from typing import Callable, Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -518,7 +518,7 @@ class PackageNameResolver:
 
         return _MACRO_PATTERN.sub(replace_macro, name)
 
-    def resolve_virtual_provide(self, name: str) -> Optional[str]:
+    def resolve_virtual_provide(self, name: str) -> str | None:
         """
         Try to resolve a virtual provide name using PROVIDE_PATTERNS.
 
@@ -679,14 +679,10 @@ class PackageNameResolver:
             try:
                 ml_result = self.ml_resolver.predict(name)
                 if ml_result and isinstance(ml_result, dict):
-                    srpm = ml_result.get("srpm_name")
-                    rpm = ml_result.get("rpm_name")
-                    if srpm and srpm not in seen:
-                        seen.add(srpm)
-                        candidates.append(srpm)
-                    if rpm and rpm not in seen:
-                        seen.add(rpm)
-                        candidates.append(rpm)
+                    for predicted in (ml_result.get("srpm_name"), ml_result.get("rpm_name")):
+                        if predicted and predicted not in seen:
+                            seen.add(predicted)
+                            candidates.append(predicted)
             except Exception:
                 pass
 

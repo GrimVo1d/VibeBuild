@@ -365,7 +365,7 @@ class TestMLPackageResolverCache:
         trained_resolver.predict("python3dist(requests)")
 
         assert cache_file.exists()
-        with open(cache_file, "r") as f:
+        with open(cache_file) as f:
             disk_cache = json.load(f)
         assert len(disk_cache) == 1
 

@@ -21,7 +21,6 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -45,7 +44,7 @@ COMPLEX_NAME_PATTERN = re.compile(
 )
 
 
-def discover_mirror(release: int, arch: str) -> Optional[str]:
+def discover_mirror(release: int, arch: str) -> str | None:
     """
     Discover a Fedora mirror URL using the metalink service.
 
@@ -104,7 +103,7 @@ def discover_mirror(release: int, arch: str) -> Optional[str]:
     return fallback
 
 
-def find_primary_xml_url(base_url: str) -> Optional[str]:
+def find_primary_xml_url(base_url: str) -> str | None:
     """
     Parse repomd.xml to find the location of primary metadata (primary.xml.gz or primary.xml.zst).
 
@@ -362,8 +361,8 @@ def collect_via_dnf(release: int, arch: str) -> list[dict]:
     # %{provides} expands to one provide per line, so a single package produces
     # one header line `name|sourcerpm|first-provide` followed by continuation lines
     # without delimiters. Track the current package across continuations.
-    cur_rpm: Optional[str] = None
-    cur_srpm: Optional[str] = None
+    cur_rpm: str | None = None
+    cur_srpm: str | None = None
 
     for line in result.stdout.strip().split("\n"):
         line = line.strip()

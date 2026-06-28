@@ -16,7 +16,6 @@ import re
 import struct
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import koji  # type: ignore[import-untyped]
 import requests
@@ -74,7 +73,7 @@ class SRPMFetcher:
 
     def __init__(
         self,
-        download_dir: Optional[str] = None,
+        download_dir: str | None = None,
         fedora_release: str = "rawhide",
         no_ssl_verify: bool = False,
         name_resolver=None,
@@ -101,7 +100,7 @@ class SRPMFetcher:
             opts["no_ssl_verify"] = True
         return koji.ClientSession(self.koji_server, opts=opts)
 
-    def download_srpm(self, package_name: str, version: Optional[str] = None) -> str:
+    def download_srpm(self, package_name: str, version: str | None = None) -> str:
         """
         Download the SRPM of a package's latest build (or of `version`).
 
@@ -154,7 +153,7 @@ class SRPMFetcher:
         # f<N>-updates inherits f<N>: it sees stable updates as well as the GA builds
         return [f"{tag}-updates", tag]
 
-    def _find_build(self, session: koji.ClientSession, name: str, version: Optional[str]):
+    def _find_build(self, session: koji.ClientSession, name: str, version: str | None):
         if version:
             return session.getBuild(f"{name}-{version}")
         for tag in self._release_tags(session):
@@ -166,7 +165,7 @@ class SRPMFetcher:
                 return builds[0]
         return None
 
-    def _download_from_koji(self, package_name: str, version: Optional[str]) -> str:
+    def _download_from_koji(self, package_name: str, version: str | None) -> str:
         """Find the build in Koji, download its SRPM and check it against Koji's digest."""
         if not _SAFE_NAME.match(package_name):
             raise SRPMNotFoundError(f"Invalid package name: {package_name!r}")

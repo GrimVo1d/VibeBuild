@@ -9,7 +9,6 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import koji  # type: ignore[import-untyped]
 
@@ -60,10 +59,10 @@ class BuildTask:
     package_name: str
     srpm_path: str
     target: str
-    task_id: Optional[int] = None
+    task_id: int | None = None
     status: BuildStatus = BuildStatus.PENDING
-    error_message: Optional[str] = None
-    nvr: Optional[str] = None
+    error_message: str | None = None
+    nvr: str | None = None
 
 
 @dataclass
@@ -76,7 +75,7 @@ class BuildResult:
     built_packages: list[str] = field(default_factory=list)
     total_time: float = 0.0
     toolchains: list[str] = field(default_factory=list)
-    tagged_target: Optional[str] = None
+    tagged_target: str | None = None
     tagged_deps: list[str] = field(default_factory=list)
 
 
@@ -97,22 +96,22 @@ class KojiBuilder:
         self,
         koji_server: str = "https://koji.fedoraproject.org/kojihub",
         koji_web_url: str = "https://koji.fedoraproject.org/koji",
-        cert: Optional[str] = None,
-        serverca: Optional[str] = None,
+        cert: str | None = None,
+        serverca: str | None = None,
         target: str = "fedora-target",
         build_tag: str = "fedora-build",
         scratch: bool = False,
         nowait: bool = False,
-        download_dir: Optional[str] = None,
+        download_dir: str | None = None,
         no_ssl_verify: bool = False,
         no_name_resolution: bool = False,
         no_ml: bool = False,
-        ml_model_path: Optional[str] = None,
+        ml_model_path: str | None = None,
         fedora_release: str = "rawhide",
         force: bool = False,
         idempotent: bool = False,
         build_all_deps: bool = False,
-        dest_tag: Optional[str] = None,
+        dest_tag: str | None = None,
         patch_specs: bool = False,
     ):
         self.koji_server = koji_server
@@ -168,9 +167,9 @@ class KojiBuilder:
         )
 
         self._tasks: list[BuildTask] = []
-        self._session: Optional["koji.ClientSession"] = None
+        self._session: koji.ClientSession | None = None
 
-    def _get_env(self) -> Optional[dict]:
+    def _get_env(self) -> dict | None:
         """Get environment variables for subprocess, with SSL verification disabled if needed."""
         if self.no_ssl_verify:
             env = os.environ.copy()
@@ -229,25 +228,25 @@ class KojiBuilder:
         Returns:
             BuildTask with task_id and status BUILDING
         """
-        srpm_path = Path(srpm_path)
-        if not srpm_path.exists():
-            raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+        srpm = Path(srpm_path)
+        if not srpm.exists():
+            raise FileNotFoundError(f"SRPM not found: {srpm}")
 
         # With patch_specs the spec loses %check (upstream testsuites may need network
         # or process limits our buildroot lacks). The macro
         # `_unpackaged_files_terminate_build 0` is added only on retry.
-        patched: Optional[str] = None
+        patched: str | None = None
         if self.patch_specs:
             try:
-                patched = patch_srpm(str(srpm_path), add_unpackaged_macro=add_unpackaged_macro)
+                patched = patch_srpm(str(srpm), add_unpackaged_macro=add_unpackaged_macro)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "spec patching skipped for %s: %s — using original SRPM",
-                    srpm_path.name,
+                    srpm.name,
                     exc,
                 )
         try:
-            return self._submit_srpm(srpm_path, Path(patched) if patched else srpm_path, scratch)
+            return self._submit_srpm(srpm, Path(patched) if patched else srpm, scratch)
         finally:
             if patched:
                 cleanup_patched(patched)
@@ -448,7 +447,7 @@ class KojiBuilder:
     }
 
     @classmethod
-    def _state_name(cls, state_int: Optional[int]) -> str:
+    def _state_name(cls, state_int: int | None) -> str:
         if state_int is None:
             return "unknown"
         return cls._KOJI_TASK_STATES.get(state_int, "unknown")
@@ -581,7 +580,7 @@ class KojiBuilder:
         else:
             logger.warning(f"newRepo ended in state {state}, proceeding anyway")
 
-    def wait_for_repo(self, tag: Optional[str] = None, timeout: int = 1800) -> bool:
+    def wait_for_repo(self, tag: str | None = None, timeout: int = 1800) -> bool:
         """Trigger newRepo and wait. Returns True on `closed`."""
         tag = tag or self.build_tag
         logger.info(f"Waiting for repo regeneration: {tag}")
@@ -639,11 +638,11 @@ class KojiBuilder:
         start_time = time.time()
         result = BuildResult(success=True)
 
-        srpm_path = Path(srpm_path)
-        if not srpm_path.exists():
-            raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+        srpm = Path(srpm_path)
+        if not srpm.exists():
+            raise FileNotFoundError(f"SRPM not found: {srpm}")
 
-        logger.info(f"Starting vibebuild for: {srpm_path}")
+        logger.info(f"Starting vibebuild for: {srpm}")
 
         # Open one session for the whole build_with_deps: all koji RPCs go
         # through it to avoid AuthLockError from per-user serialization.
@@ -651,7 +650,7 @@ class KojiBuilder:
         if own_session:
             self._open_session()
         try:
-            return self._build_with_deps_impl(srpm_path, result, start_time)
+            return self._build_with_deps_impl(srpm, result, start_time)
         finally:
             if own_session:
                 self._close_session()
@@ -670,7 +669,7 @@ class KojiBuilder:
 
         _download_seen: set[str] = set()
 
-        def srpm_resolver(pkg_name: str) -> Optional[str]:
+        def srpm_resolver(pkg_name: str) -> str | None:
             if pkg_name in _download_seen:
                 return None
             _download_seen.add(pkg_name)
@@ -771,7 +770,7 @@ class KojiBuilder:
 
     def _can_retry_unpackaged(self, task: BuildTask) -> bool:
         """True if a failed task hit unpackaged files and may be retried with the macro."""
-        if not self._task_has_unpackaged_files_error(task.task_id):
+        if task.task_id is None or not self._task_has_unpackaged_files_error(task.task_id):
             return False
         if not self.patch_specs:
             logger.info(

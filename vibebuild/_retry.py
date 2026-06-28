@@ -13,7 +13,8 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from typing import Callable, Optional, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def with_retry(
     attempts: int = 3,
     backoff: float = 2.0,
     initial_delay: float = 1.0,
-    transient_check: Optional[Callable[[BaseException], bool]] = None,
+    transient_check: Callable[[BaseException], bool] | None = None,
 ):
     """
     Decorator: repeats the call up to `attempts` times with exponential backoff.
@@ -70,7 +71,7 @@ def with_retry(
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             delay = initial_delay
-            last_exc: Optional[BaseException] = None
+            last_exc: BaseException | None = None
             for attempt in range(1, attempts + 1):
                 try:
                     return fn(*args, **kwargs)

@@ -15,8 +15,8 @@ import resource
 import statistics
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 def _peak_rss_mb() -> float:

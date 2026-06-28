@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 try:
     import joblib  # pragma: no cover
@@ -67,7 +67,7 @@ class MLPackageResolver:
     _model_path: Path = _DEFAULT_MODEL_PATH
     _load_attempted: bool = False
 
-    def __init__(self, model_path: Optional[str] = None):
+    def __init__(self, model_path: str | None = None):
         """
         Initialize the ML package resolver.
 
@@ -81,8 +81,8 @@ class MLPackageResolver:
         package where the rules cover all BR).
         """
         self.confidence_threshold = 0.3
-        self._vectorizer: Optional[object] = None
-        self._nn_model: Optional[object] = None
+        self._vectorizer: Any = None
+        self._nn_model: Any = None
         self._rpm_names: list[str] = []
         self._srpm_names: list[str] = []
         self._provides: list[str] = []
@@ -169,7 +169,7 @@ class MLPackageResolver:
         vocab_size = len(self._vectorizer.vocabulary_)
         logger.info("Model trained: %d samples, vocabulary size %d", len(data), vocab_size)
 
-    def predict(self, dep_name: str) -> Optional[dict]:
+    def predict(self, dep_name: str) -> dict | None:
         """
         Predict the RPM package name for a dependency string.
 
@@ -292,7 +292,7 @@ class MLPackageResolver:
         """Load prediction cache from disk."""
         try:
             if _CACHE_FILE.exists():
-                with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+                with open(_CACHE_FILE, encoding="utf-8") as f:
                     self._cache = json.load(f)
                 logger.debug("Loaded %d cached predictions", len(self._cache))
         except (json.JSONDecodeError, OSError) as e:

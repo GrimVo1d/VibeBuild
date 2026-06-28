@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vibebuild.analyzer import PackageInfo
@@ -56,7 +56,7 @@ def _cache_path(key: str) -> Path:
     return _CACHE_DIR / f"{key}.json"
 
 
-def get(srpm_path: str) -> Optional["PackageInfo"]:
+def get(srpm_path: str) -> PackageInfo | None:
     """Return the cached PackageInfo for an SRPM, or None."""
     from vibebuild.analyzer import BuildRequirement, PackageInfo
 
@@ -88,7 +88,7 @@ def get(srpm_path: str) -> Optional["PackageInfo"]:
     )
 
 
-def put(srpm_path: str, info: "PackageInfo") -> None:
+def put(srpm_path: str, info: PackageInfo) -> None:
     """Save PackageInfo to the cache."""
     key = _file_key(Path(srpm_path))
     if not key:

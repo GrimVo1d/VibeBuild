@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
 
 import koji  # type: ignore[import-untyped]
 
@@ -71,8 +71,8 @@ class DependencyNode:
     """Node in dependency graph."""
 
     name: str
-    srpm_path: Optional[str] = None
-    package_info: Optional[PackageInfo] = None
+    srpm_path: str | None = None
+    package_info: PackageInfo | None = None
     dependencies: list[str] = field(default_factory=list)
     is_available: bool = False
     build_order: int = -1
@@ -89,8 +89,8 @@ class KojiClient:
         self,
         server: str = "https://koji.fedoraproject.org/kojihub",
         web_url: str = "https://koji.fedoraproject.org/koji",
-        cert: Optional[str] = None,
-        serverca: Optional[str] = None,
+        cert: str | None = None,
+        serverca: str | None = None,
         no_ssl_verify: bool = False,
     ):
         self.server = server
@@ -98,8 +98,8 @@ class KojiClient:
         self.cert = cert
         self.serverca = serverca
         self.no_ssl_verify = no_ssl_verify
-        self._session: Optional[koji.ClientSession] = None
-        self._latest: dict[tuple[str, str], Optional[dict[str, str]]] = {}
+        self._session: koji.ClientSession | None = None
+        self._latest: dict[tuple[str, str], dict[str, str] | None] = {}
 
     @property
     def session(self) -> koji.ClientSession:
@@ -137,13 +137,13 @@ class KojiClient:
         return {b["package_name"]: b["nvr"] for b in builds or []}
 
     @staticmethod
-    def _build_info(builds) -> Optional[dict[str, str]]:
+    def _build_info(builds) -> dict[str, str] | None:
         if not builds:
             return None
         b = builds[0]
         return {"nvr": b["nvr"], "version": b["version"], "release": b["release"]}
 
-    def latest_build(self, package: str, tag: str) -> Optional[dict[str, str]]:
+    def latest_build(self, package: str, tag: str) -> dict[str, str] | None:
         """
         Latest build of a package in the tag, inheritance included.
 
@@ -180,7 +180,7 @@ class KojiClient:
         """Check if package has a build tagged in the given tag (including inherited)."""
         return self.latest_build(package, tag) is not None
 
-    def get_target(self, target: str) -> Optional[dict[str, str]]:
+    def get_target(self, target: str) -> dict[str, str] | None:
         """
         Return the build and destination tags of a build target.
 
@@ -207,7 +207,7 @@ class DependencyResolver:
 
     def __init__(
         self,
-        koji_client: Optional[KojiClient] = None,
+        koji_client: KojiClient | None = None,
         koji_tag: str = "fedora-build",
         name_resolver=None,
         build_all_deps: bool = False,
@@ -216,10 +216,10 @@ class DependencyResolver:
         self.koji_tag = koji_tag
         self.name_resolver = name_resolver
         self.build_all_deps = build_all_deps
-        self._available_packages: Optional[set[str]] = None
+        self._available_packages: set[str] | None = None
         self._dependency_graph: dict[str, DependencyNode] = {}
-        self._root: Optional[str] = None
-        self._has_external_repos: Optional[bool] = None
+        self._root: str | None = None
+        self._has_external_repos: bool | None = None
 
     @property
     def available_packages(self) -> set[str]:
@@ -244,8 +244,8 @@ class DependencyResolver:
     def _version_ok(
         self,
         package: str,
-        required_op: Optional[str],
-        required_ver: Optional[str],
+        required_op: str | None,
+        required_ver: str | None,
     ) -> bool:
         """
         Check that the latest build of a package satisfies required_op required_ver.
@@ -434,7 +434,7 @@ class DependencyResolver:
         return missing
 
     def build_dependency_graph(
-        self, root_package: str, srpm_path: str, srpm_resolver: Optional[Callable] = None
+        self, root_package: str, srpm_path: str, srpm_resolver: Callable | None = None
     ) -> dict[str, DependencyNode]:
         """
         Build complete dependency graph starting from root package.
@@ -454,7 +454,7 @@ class DependencyResolver:
         self._root = root_package
         visited = set()
 
-        def resolve_deps(pkg_name: str, pkg_srpm: Optional[str] = None):
+        def resolve_deps(pkg_name: str, pkg_srpm: str | None = None):
             if pkg_name in visited:
                 return
             visited.add(pkg_name)
@@ -484,7 +484,7 @@ class DependencyResolver:
                     if srpm_resolver and missing:
                         from concurrent.futures import ThreadPoolExecutor
 
-                        def _safe_resolve(d: str) -> Optional[str]:
+                        def _safe_resolve(d: str) -> str | None:
                             try:
                                 return srpm_resolver(d)
                             except Exception as exc:

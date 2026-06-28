@@ -30,7 +30,6 @@ import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from vibebuild.exceptions import VibeBuildError
 
@@ -76,7 +75,7 @@ _SECTION_NAMES = frozenset(
 )
 
 
-def _section_token(line: str) -> Optional[str]:
+def _section_token(line: str) -> str | None:
     """Return the section name if the line starts one, otherwise None."""
     stripped = line.lstrip()
     if not stripped.startswith("%"):
@@ -145,7 +144,7 @@ def _rpm_path(path: Path) -> str:
 
 
 @functools.cache
-def _bwrap() -> Optional[str]:
+def _bwrap() -> str | None:
     """Path to a working bwrap, or None (not installed, or no user namespaces)."""
     bwrap = shutil.which("bwrap")
     if not bwrap:

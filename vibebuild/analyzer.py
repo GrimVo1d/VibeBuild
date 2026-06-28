@@ -6,7 +6,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from vibebuild.exceptions import InvalidSRPMError, SpecParseError
 
@@ -16,8 +15,8 @@ class BuildRequirement:
     """Represents a single build requirement."""
 
     name: str
-    version: Optional[str] = None
-    operator: Optional[str] = None
+    version: str | None = None
+    operator: str | None = None
 
     def __str__(self) -> str:
         if self.version and self.operator:
@@ -73,11 +72,11 @@ class SpecAnalyzer:
             FileNotFoundError: If spec file doesn't exist
             SpecParseError: If spec file cannot be parsed
         """
-        spec_path = Path(spec_path)
-        if not spec_path.exists():
-            raise FileNotFoundError(f"Spec file not found: {spec_path}")
+        path = Path(spec_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Spec file not found: {path}")
 
-        content = spec_path.read_text(encoding="utf-8", errors="replace")
+        content = path.read_text(encoding="utf-8", errors="replace")
         return self._parse_spec_content(content)
 
     def _parse_spec_content(self, content: str) -> PackageInfo:

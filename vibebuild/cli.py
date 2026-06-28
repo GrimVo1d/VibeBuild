@@ -24,7 +24,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from vibebuild import __version__
 from vibebuild.analyzer import get_package_info_from_srpm
@@ -35,9 +34,9 @@ from vibebuild.name_resolver import PackageNameResolver
 from vibebuild.resolver import DependencyResolver, KojiClient
 
 
-def load_koji_config() -> dict[str, Optional[str]]:
+def load_koji_config() -> dict[str, str | None]:
     """Load server, weburl, cert, serverca, target from ~/.koji/config and /etc/koji.conf."""
-    out: dict[str, Optional[str]] = {
+    out: dict[str, str | None] = {
         "server": None,
         "web_url": None,
         "cert": None,
@@ -74,7 +73,7 @@ def load_koji_config() -> dict[str, Optional[str]]:
 
 
 def create_name_resolver(
-    no_ml: bool = False, ml_model_path: Optional[str] = None
+    no_ml: bool = False, ml_model_path: str | None = None
 ) -> PackageNameResolver:
     """Create a PackageNameResolver with optional ML fallback."""
     ml_resolver = None
@@ -156,7 +155,7 @@ class _HelpAllArgumentParser(argparse.ArgumentParser):
         return short
 
 
-def detect_fedora_release(target: str) -> Optional[str]:
+def detect_fedora_release(target: str) -> str | None:
     """Auto-detect Fedora release from build target name (e.g. 'f42' -> '42')."""
     import re
 
@@ -416,7 +415,7 @@ def print_build_result(result: BuildResult) -> None:
 
 
 def resolve_target_tags(
-    koji_client: KojiClient, target: str, build_tag: Optional[str] = None
+    koji_client: KojiClient, target: str, build_tag: str | None = None
 ) -> tuple[str, str]:
     """Return (build_tag, dest_tag) of a Koji target; an explicit build tag wins."""
     info = koji_client.get_target(target)
@@ -428,15 +427,15 @@ def resolve_target_tags(
 def cmd_analyze(
     srpm_path: str,
     server: str,
-    build_tag: Optional[str],
-    cert: Optional[str],
-    serverca: Optional[str],
+    build_tag: str | None,
+    cert: str | None,
+    serverca: str | None,
     no_ssl_verify: bool = False,
     no_name_resolution: bool = False,
     no_ml: bool = False,
-    ml_model_path: Optional[str] = None,
+    ml_model_path: str | None = None,
     build_all_deps: bool = False,
-    target: Optional[str] = None,
+    target: str | None = None,
 ) -> int:
     """Analyze SRPM dependencies the same way a build would, without downloading or building."""
     print(f"Analyzing: {srpm_path}")
@@ -490,10 +489,10 @@ def cmd_analyze(
 
 def ensure_srpm_path(
     srpm_arg: str,
-    download_dir: Optional[str],
+    download_dir: str | None,
     no_ssl_verify: bool,
     no_ml: bool,
-    ml_model_path: Optional[str],
+    ml_model_path: str | None,
     fedora_release: str = "rawhide",
 ) -> str:
     """
@@ -519,10 +518,10 @@ def ensure_srpm_path(
 
 def cmd_download(
     package_name: str,
-    download_dir: Optional[str],
+    download_dir: str | None,
     no_ssl_verify: bool = False,
     no_ml: bool = False,
-    ml_model_path: Optional[str] = None,
+    ml_model_path: str | None = None,
     fedora_release: str = "rawhide",
 ) -> int:
     """Download SRPM from Fedora."""
@@ -551,18 +550,18 @@ def cmd_build(
     srpm_path: str,
     server: str,
     web_url: str,
-    cert: Optional[str],
-    serverca: Optional[str],
-    build_tag: Optional[str],
+    cert: str | None,
+    serverca: str | None,
+    build_tag: str | None,
     scratch: bool,
     nowait: bool,
     no_deps: bool,
-    download_dir: Optional[str],
+    download_dir: str | None,
     dry_run: bool,
     no_ssl_verify: bool = False,
     no_name_resolution: bool = False,
     no_ml: bool = False,
-    ml_model_path: Optional[str] = None,
+    ml_model_path: str | None = None,
     fedora_release: str = "rawhide",
     force: bool = False,
     no_idempotency: bool = False,
@@ -614,7 +613,7 @@ def cmd_build(
 
         if not no_deps:
 
-            def srpm_resolver(pkg: str) -> Optional[str]:
+            def srpm_resolver(pkg: str) -> str | None:
                 try:
                     return builder.fetcher.download_srpm(pkg)
                 except Exception:
@@ -720,7 +719,7 @@ def _train_subcommand(argv: list[str]) -> int:
     return 0
 
 
-def main(args: Optional[list[str]] = None) -> int:
+def main(args: list[str] | None = None) -> int:
     """Main entry point.
 
     Positional argument resolution:
