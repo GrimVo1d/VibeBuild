@@ -89,8 +89,6 @@ def mock_koji_client():
     """Mock KojiClient for testing without real Koji."""
     client = Mock()
     client.server = "https://test.koji.internal/kojihub"
-    client.web_url = "https://test.koji.internal/koji"
-    client.cert = None
     client.serverca = None
     client.list_packages.return_value = ["python3", "gcc", "make", "glibc"]
     client.package_exists.return_value = True
@@ -98,7 +96,6 @@ def mock_koji_client():
         "python3": "python3-3.11.0-1.fc40",
         "gcc": "gcc-13.0-1.fc40",
     }
-    client.search_package.return_value = []
     client.has_external_repos.return_value = False
     return client
 
@@ -140,7 +137,10 @@ def mock_koji_session(mocker):
     session.logout.return_value = None
     session.ssl_login.return_value = None
     session.cancelTask.return_value = None
-    mocker.patch("vibebuild.builder.koji.ClientSession", return_value=session)
+    session.getLoggedInUser.return_value = {"name": "kojiadmin"}
+    session.getLatestBuilds.return_value = []
+    session.listTagged.return_value = []
+    mocker.patch("vibebuild.koji_client.koji.ClientSession", return_value=session)
     return session
 
 

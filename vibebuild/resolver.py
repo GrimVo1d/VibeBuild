@@ -9,10 +9,9 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-import koji  # type: ignore[import-untyped]
-
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
-from vibebuild.exceptions import CircularDependencyError, KojiConnectionError
+from vibebuild.exceptions import CircularDependencyError
+from vibebuild.koji_client import KojiClient
 
 logger = logging.getLogger(__name__)
 
@@ -78,125 +77,6 @@ class DependencyNode:
     build_order: int = -1
 
 
-class KojiClient:
-    """Read-only client for one Koji hub over XML-RPC (anonymous session).
-
-    Answers are cached per client: within one vibebuild run the tags only change
-    through our own builds, and callers that need fresh data call `clear_cache`.
-    """
-
-    def __init__(
-        self,
-        server: str = "https://koji.fedoraproject.org/kojihub",
-        web_url: str = "https://koji.fedoraproject.org/koji",
-        cert: str | None = None,
-        serverca: str | None = None,
-        no_ssl_verify: bool = False,
-    ):
-        self.server = server
-        self.web_url = web_url
-        self.cert = cert
-        self.serverca = serverca
-        self.no_ssl_verify = no_ssl_verify
-        self._session: koji.ClientSession | None = None
-        self._latest: dict[tuple[str, str], dict[str, str] | None] = {}
-
-    @property
-    def session(self) -> koji.ClientSession:
-        """Anonymous session, created on first use. koji retries connection errors itself."""
-        if self._session is None:
-            opts: dict = {"anon_retry": True, "max_retries": 3, "retry_interval": 2}
-            if self.no_ssl_verify:
-                opts["no_ssl_verify"] = True
-            elif self.serverca:
-                opts["serverca"] = self.serverca
-            self._session = koji.ClientSession(self.server, opts=opts)
-        return self._session
-
-    def _call(self, method: str, *args, **kwargs):
-        """Call a hub method; transport failures become KojiConnectionError."""
-        try:
-            return getattr(self.session, method)(*args, **kwargs)
-        except koji.GenericError:
-            raise
-        except Exception as exc:
-            raise KojiConnectionError(f"Koji call {method} failed: {exc}") from exc
-
-    def clear_cache(self) -> None:
-        """Forget cached builds (after tagging new ones)."""
-        self._latest.clear()
-
-    def list_packages(self, tag: str) -> list[str]:
-        """Names of packages in the tag's package list (inherited, not blocked)."""
-        packages = self._call("listPackages", tagID=tag, inherited=True, with_blocked=False)
-        return [p["package_name"] for p in packages or []]
-
-    def list_tagged_builds(self, tag: str) -> dict[str, str]:
-        """Latest build of every package in the tag: {package_name: nvr}."""
-        builds = self._call("listTagged", tag, latest=True)
-        return {b["package_name"]: b["nvr"] for b in builds or []}
-
-    @staticmethod
-    def _build_info(builds) -> dict[str, str] | None:
-        if not builds:
-            return None
-        b = builds[0]
-        return {"nvr": b["nvr"], "version": b["version"], "release": b["release"]}
-
-    def latest_build(self, package: str, tag: str) -> dict[str, str] | None:
-        """
-        Latest build of a package in the tag, inheritance included.
-
-        Returns:
-            {"nvr": "...", "version": "...", "release": "..."} or None if there is no build.
-        """
-        key = (package, tag)
-        if key not in self._latest:
-            try:
-                builds = self._call("getLatestBuilds", tag, package=package)
-            except koji.GenericError:  # unknown package name
-                builds = []
-            self._latest[key] = self._build_info(builds)
-        return self._latest[key]
-
-    def prefetch_latest_builds(self, packages: Sequence[str], tag: str) -> None:
-        """Look up the latest builds of many packages in one multicall request."""
-        names = sorted({p for p in packages if (p, tag) not in self._latest})
-        if not names:
-            return
-        try:
-            with self.session.multicall(strict=False) as m:
-                calls = {name: m.getLatestBuilds(tag, package=name) for name in names}
-        except Exception as exc:
-            logger.debug("multicall getLatestBuilds failed, falling back to single calls: %s", exc)
-            return
-        for name, call in calls.items():
-            try:
-                self._latest[(name, tag)] = self._build_info(call.result)
-            except koji.GenericError:  # unknown package name
-                self._latest[(name, tag)] = None
-
-    def package_exists(self, package: str, tag: str) -> bool:
-        """Check if package has a build tagged in the given tag (including inherited)."""
-        return self.latest_build(package, tag) is not None
-
-    def get_target(self, target: str) -> dict[str, str] | None:
-        """
-        Return the build and destination tags of a build target.
-
-        Returns:
-            {"build_tag": "...", "dest_tag": "..."} or None if the target does not exist.
-        """
-        info = self._call("getBuildTarget", target)
-        if not info:
-            return None
-        return {"build_tag": info["build_tag_name"], "dest_tag": info["dest_tag_name"]}
-
-    def has_external_repos(self, tag: str) -> bool:
-        """Check if a tag has external repos configured (inheritance included)."""
-        return bool(self._call("getExternalRepoList", tag))
-
-
 class DependencyResolver:
     """
     Resolves build dependencies and creates build order.
@@ -207,12 +87,12 @@ class DependencyResolver:
 
     def __init__(
         self,
-        koji_client: KojiClient | None = None,
-        koji_tag: str = "fedora-build",
+        koji_client: KojiClient,
+        koji_tag: str,
         name_resolver=None,
         build_all_deps: bool = False,
     ):
-        self.koji = koji_client or KojiClient()
+        self.koji = koji_client
         self.koji_tag = koji_tag
         self.name_resolver = name_resolver
         self.build_all_deps = build_all_deps
@@ -220,6 +100,11 @@ class DependencyResolver:
         self._dependency_graph: dict[str, DependencyNode] = {}
         self._root: str | None = None
         self._has_external_repos: bool | None = None
+
+    @property
+    def dependency_graph(self) -> dict[str, DependencyNode]:
+        """Nodes of the last build_dependency_graph run, by package name."""
+        return self._dependency_graph
 
     @property
     def available_packages(self) -> set[str]:

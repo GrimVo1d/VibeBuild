@@ -76,8 +76,7 @@ After installing, you can check that everything works:
 
 ```bash
 vibebuild --version
-vibebuild --help          # short list of the main options
-vibebuild --help-all      # full list of all options
+vibebuild --help
 ```
 
 If `[dev]` is installed, run the tests from the project root:
@@ -99,7 +98,7 @@ Without `koji`, use any `.src.rpm` you have for `--analyze-only` and `--dry-run`
 
 ### Using your own Koji server
 
-If you already have a Koji, `vibebuild` reads `~/.koji/config` (and `/etc/koji.conf`) to get `server`, `weburl`, `cert` and `serverca`, so it is often enough to pass `--server` to override. All options: `vibebuild --help-all`.
+If you already have a Koji, `vibebuild` reads `~/.koji/config` (and `/etc/koji.conf`) to get `server`, `cert`, `serverca`, `target` and `build_tag`, so it is often enough to pass `--server` to override. All options: `vibebuild --help`.
 
 ```bash
 # After setting up ~/.koji/config with target = my-target:

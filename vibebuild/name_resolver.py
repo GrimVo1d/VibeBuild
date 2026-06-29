@@ -710,3 +710,20 @@ class PackageNameResolver:
             candidates.append(name)
 
         return candidates
+
+
+def create_name_resolver(
+    no_ml: bool = False, ml_model_path: str | None = None
+) -> PackageNameResolver:
+    """A PackageNameResolver with the ML fallback when scikit-learn and a model are there."""
+    ml_resolver = None
+    if not no_ml:
+        try:
+            from vibebuild.ml_resolver import MLPackageResolver
+
+            ml_resolver = MLPackageResolver(model_path=ml_model_path)
+            if not ml_resolver.is_available():
+                ml_resolver = None
+        except ImportError:
+            ml_resolver = None
+    return PackageNameResolver(ml_resolver=ml_resolver)

@@ -1,27 +1,20 @@
-#!/usr/bin/env python3
 """
 VibeBuild CLI - Koji extension for automatic dependency resolution.
 
 Usage:
     vibebuild [OPTIONS] SRPM
     vibebuild [OPTIONS] TARGET SRPM
+    vibebuild train [OPTIONS]
 
-    SRPM can be a path to a .src.rpm file or a package name (e.g. python3).
-    If a package name is given, the SRPM is downloaded from Koji and then built.
-    When TARGET is omitted, it is read from 'target' key in ~/.koji/config [koji].
-
-Examples:
-    vibebuild python-requests
-    vibebuild fedora-target python3
-    vibebuild fedora-target my-package.src.rpm
-    vibebuild --scratch fedora-target python-requests
-    vibebuild --server https://my-koji/kojihub fedora-target pkg.src.rpm
+SRPM is a path to a .src.rpm file or a package name; a name is downloaded from
+Fedora Koji first. Without TARGET, 'target' from ~/.koji/config [koji] is used.
 """
 
 import argparse
 import configparser
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -30,74 +23,41 @@ from vibebuild.analyzer import get_package_info_from_srpm
 from vibebuild.builder import BuildResult, BuildStatus, KojiBuilder
 from vibebuild.exceptions import VibeBuildError
 from vibebuild.fetcher import SRPMFetcher
-from vibebuild.name_resolver import PackageNameResolver
-from vibebuild.resolver import DependencyResolver, KojiClient
+from vibebuild.koji_client import KojiClient
+from vibebuild.name_resolver import PackageNameResolver, create_name_resolver
+from vibebuild.resolver import DependencyResolver
+
+FEDORA_KOJI = "https://koji.fedoraproject.org/kojihub"
 
 
 def load_koji_config() -> dict[str, str | None]:
-    """Load server, weburl, cert, serverca, target from ~/.koji/config and /etc/koji.conf."""
+    """Load server, cert, serverca, target and build_tag from ~/.koji/config, /etc/koji.conf."""
     out: dict[str, str | None] = {
         "server": None,
-        "web_url": None,
         "cert": None,
         "serverca": None,
         "target": None,
         "build_tag": None,
     }
-    config = configparser.ConfigParser()
-    for path in [
-        Path.home() / ".koji" / "config",
-        Path("/etc/koji.conf"),
-    ]:
+    for path in [Path.home() / ".koji" / "config", Path("/etc/koji.conf")]:
         if not path.exists():
             continue
+        config = configparser.ConfigParser()
         try:
             config.read(path, encoding="utf-8")
-            if config.has_section("koji"):
-                s = config["koji"]
-                if s.get("server") and not out["server"]:
-                    out["server"] = s["server"].strip()
-                if s.get("weburl") and not out["web_url"]:
-                    out["web_url"] = s["weburl"].strip()
-                if s.get("cert") and not out["cert"]:
-                    out["cert"] = os.path.expanduser(s["cert"].strip())
-                if s.get("serverca") and not out["serverca"]:
-                    out["serverca"] = os.path.expanduser(s["serverca"].strip())
-                if s.get("target") and not out["target"]:
-                    out["target"] = s["target"].strip()
-                if s.get("build_tag") and not out["build_tag"]:
-                    out["build_tag"] = s["build_tag"].strip()
         except (configparser.Error, OSError):
-            pass
+            continue
+        if not config.has_section("koji"):
+            continue
+        for key, value in config["koji"].items():
+            if key in out and value.strip() and not out[key]:
+                value = value.strip()
+                out[key] = os.path.expanduser(value) if key in ("cert", "serverca") else value
     return out
 
 
-def create_name_resolver(
-    no_ml: bool = False, ml_model_path: str | None = None
-) -> PackageNameResolver:
-    """Create a PackageNameResolver with optional ML fallback."""
-    ml_resolver = None
-    if not no_ml:
-        try:
-            from vibebuild.ml_resolver import MLPackageResolver
-
-            ml_resolver = MLPackageResolver(model_path=ml_model_path)
-            if not ml_resolver.is_available():
-                ml_resolver = None
-        except ImportError:
-            ml_resolver = None
-    return PackageNameResolver(ml_resolver=ml_resolver)
-
-
-def setup_logging(
-    verbose: bool = False,
-    quiet: bool = False,
-    json_logs: bool = False,
-) -> None:
-    """Configure logging based on verbosity.
-
-    json_logs=True switches to the JSON format for prod parsing.
-    """
+def setup_logging(verbose: bool = False, quiet: bool = False, json_logs: bool = False) -> None:
+    """Configure the root logger; json_logs switches to one JSON object per line."""
     if quiet:
         level = logging.WARNING
     elif verbose:
@@ -120,138 +80,67 @@ def setup_logging(
     root.setLevel(level)
 
 
-class _HelpAllArgumentParser(argparse.ArgumentParser):
-    """Parser that shows short help by default and full help with --help-all."""
-
-    def format_help(self) -> str:
-        if "--help-all" in sys.argv:
-            return super().format_help()
-        short = (
-            f"{self.description}\n\n"
-            "usage: vibebuild [OPTIONS] SRPM\n"
-            "       vibebuild [OPTIONS] TARGET SRPM\n\n"
-            "  SRPM    Path to .src.rpm or package name (e.g. python-requests);\n"
-            "          if a name, SRPM is downloaded from Fedora then built.\n"
-            "  TARGET  Build target (e.g. fedora-target).\n"
-            "          If omitted, read from 'target' in ~/.koji/config [koji].\n\n"
-            "Examples:\n"
-            "  vibebuild python-requests\n"
-            "  vibebuild fedora-target python-requests\n"
-            "  vibebuild --scratch fedora-target my-pkg.src.rpm\n"
-            "  vibebuild train --release 42      # train the ML resolver\n\n"
-            "Modes:\n"
-            "  --analyze-only     Only analyze dependencies, do not build\n"
-            "  --download-only    Only download SRPM, do not build\n"
-            "  --dry-run          Show what would be built without actually building\n"
-            "  train              Subcommand: train the ML resolver (vibebuild train --help)\n\n"
-            "Common options:\n"
-            "  -v, --verbose      Enable verbose output\n"
-            "  -q, --quiet        Suppress non-error output\n"
-            "  --scratch          Scratch-build the target (not tagged)\n"
-            "  --no-deps          Skip dependency resolution, just build the package\n"
-            "  --server URL       Koji hub URL (default: from ~/.koji/config or Fedora Koji)\n\n"
-            "Full list of options: vibebuild --help-all\n"
-        )
-        return short
-
-
-def detect_fedora_release(target: str) -> str | None:
-    """Auto-detect Fedora release from build target name (e.g. 'f42' -> '42')."""
-    import re
-
-    m = re.match(r"^f(\d+)$", target)
-    if m:
-        return m.group(1)
-    return None
+def detect_fedora_release(target: str | None) -> str | None:
+    """Fedora release from a build target named like 'f44' -> '44'."""
+    m = re.match(r"^f(\d+)$", target or "")
+    return m.group(1) if m else None
 
 
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser."""
     koji_cfg = load_koji_config()
-    default_server = koji_cfg.get("server") or "https://koji.fedoraproject.org/kojihub"
-    default_web_url = koji_cfg.get("web_url") or "https://koji.fedoraproject.org/koji"
 
-    parser = _HelpAllArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="vibebuild",
         description="Koji build with automatic dependency resolution",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Build package (target from ~/.koji/config)
-  vibebuild python-requests
-
-  # Build with explicit target
-  vibebuild fedora-target my-package-1.0-1.fc40.src.rpm
-
-  # Scratch build (not tagged)
-  vibebuild --scratch fedora-target my-package.src.rpm
-
-  # Use custom Koji server
-  vibebuild --server https://koji.internal/kojihub fedora-target pkg.src.rpm
-
-  # Analyze dependencies without building
-  vibebuild --analyze-only my-package.src.rpm
-
-  # Download SRPM from Fedora
+  vibebuild python-requests                 # target from ~/.koji/config
+  vibebuild f44 my-package-1.0-1.src.rpm    # explicit target
+  vibebuild --scratch f44 my-package.src.rpm
+  vibebuild --dry-run f44 python-requests
+  vibebuild --analyze-only f44 my-package.src.rpm
   vibebuild --download-only python-requests
+  vibebuild train --release 44              # train the ML name resolver
 """,
     )
 
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument(
-        "--help-all",
-        action="store_true",
-        help="Show all options (default help shows only common ones)",
-    )
-
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
-
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress non-error output")
-
     parser.add_argument(
         "--log-format",
         choices=("text", "json"),
         default="text",
-        help="Log format: text (default) or json for prod parsers",
+        help="Log format: text (default) or json",
     )
 
     koji_group = parser.add_argument_group("Koji options")
-
     koji_group.add_argument(
         "--server",
         metavar="URL",
-        default=default_server,
+        default=koji_cfg["server"] or FEDORA_KOJI,
         help="Koji hub URL (default: from ~/.koji/config or Fedora Koji)",
     )
-
-    koji_group.add_argument(
-        "--web-url",
-        metavar="URL",
-        default=default_web_url,
-        help="Koji web URL (default: from ~/.koji/config or Fedora)",
-    )
-
     koji_group.add_argument(
         "--cert",
         metavar="FILE",
-        default=koji_cfg.get("cert"),
+        default=koji_cfg["cert"],
         help="Client certificate for authentication (default: from ~/.koji/config)",
     )
-
     koji_group.add_argument(
         "--serverca",
         metavar="FILE",
-        default=koji_cfg.get("serverca"),
+        default=koji_cfg["serverca"],
         help="CA certificate for server verification (default: from ~/.koji/config)",
     )
-
     koji_group.add_argument(
         "--build-tag",
         metavar="TAG",
-        default=koji_cfg.get("build_tag"),
+        default=koji_cfg["build_tag"],
         help="Build tag for dependency checking (default: from ~/.koji/config or the target)",
     )
-
     koji_group.add_argument(
         "--no-ssl-verify",
         action="store_true",
@@ -259,101 +148,68 @@ Examples:
     )
 
     build_group = parser.add_argument_group("Build options")
-
     build_group.add_argument(
         "--scratch",
         action="store_true",
         help="Scratch-build the target (not tagged); dependencies are still regular builds",
     )
-
     build_group.add_argument(
-        "--nowait", action="store_true", help="Do not wait for builds to complete"
+        "--nowait", action="store_true", help="Do not wait for the target build to complete"
     )
-
     build_group.add_argument(
         "--no-deps", action="store_true", help="Skip dependency resolution, just build the package"
     )
-
-    build_group.add_argument(
-        "--force",
-        action="store_true",
-        help="Rebuild the package even if an identical NVR is already in the target tag",
-    )
-    build_group.add_argument(
-        "--no-idempotency",
-        action="store_true",
-        help=(
-            "Disable the idempotency pre-check (by default vibebuild skips already built packages)"
-        ),
-    )
-
     build_group.add_argument(
         "--build-all-deps",
         action="store_true",
         help="Build entire dependency graph locally, including packages available in Fedora repos",
     )
-
     build_group.add_argument(
         "--patch-specs",
         action="store_true",
         help="Rebuild SRPMs locally without %%check, and retry builds failing on unpackaged "
         "files; runs rpmbuild on the spec (sandboxed with bwrap when available)",
     )
-
     build_group.add_argument(
         "--download-dir",
         metavar="DIR",
         help="Directory for downloaded SRPMs (default: ~/.cache/vibebuild/srpms)",
     )
-
+    build_group.add_argument(
+        "--fedora-release",
+        metavar="VER",
+        help="Fedora release to fetch SRPMs from (e.g. 44). "
+        "Default: from the target name (f44), else rawhide",
+    )
     build_group.add_argument(
         "--no-name-resolution",
         action="store_true",
         help="Disable package name normalization (macros, virtual provides)",
     )
-
     build_group.add_argument(
         "--no-ml", action="store_true", help="Disable ML-based package name resolution"
     )
-
     build_group.add_argument(
         "--ml-model", metavar="PATH", help="Path to ML model file (default: built-in)"
     )
 
-    build_group.add_argument(
-        "--fedora-release",
-        metavar="VER",
-        help=(
-            "Fedora release to fetch SRPMs from (e.g. 42). "
-            "Default: auto-detect from target, fallback to rawhide"
-        ),
-    )
-
     mode_group = parser.add_argument_group("Mode options")
-
     mode_group.add_argument(
         "--analyze-only", action="store_true", help="Only analyze dependencies, do not build"
     )
-
     mode_group.add_argument(
         "--download-only", action="store_true", help="Only download SRPM, do not build"
     )
-
     mode_group.add_argument(
         "--dry-run", action="store_true", help="Show what would be built without actually building"
     )
 
-    parser.add_argument("target", nargs="?", help="Build target (e.g., fedora-target)")
-
+    parser.add_argument("target", nargs="?", help="Build target (e.g. f44)")
     parser.add_argument(
         "srpm",
         nargs="?",
-        help=(
-            "Path to .src.rpm file or package name (e.g. python3); "
-            "if name, SRPM is downloaded then built"
-        ),
+        help="Path to .src.rpm file or package name; a name is downloaded first",
     )
-
     return parser
 
 
@@ -363,11 +219,7 @@ def print_build_result(result: BuildResult) -> None:
     print("BUILD SUMMARY")
     print("=" * 60)
 
-    if result.success:
-        print("Status: SUCCESS ✓")
-    else:
-        print("Status: FAILED ✗")
-
+    print("Status: SUCCESS ✓" if result.success else "Status: FAILED ✗")
     print(f"Total time: {result.total_time:.1f} seconds")
     print(f"Packages built: {len(result.built_packages)}")
     print(f"Packages failed: {len(result.failed_packages)}")
@@ -396,16 +248,16 @@ def print_build_result(result: BuildResult) -> None:
 
     if result.tasks:
         print("\nBuild tasks:")
+        icons = {
+            BuildStatus.COMPLETE: "✓",
+            BuildStatus.ALREADY_BUILT: "=",
+            BuildStatus.FAILED: "✗",
+            BuildStatus.BUILDING: "⏳",
+            BuildStatus.PENDING: "○",
+            BuildStatus.CANCELED: "⊘",
+        }
         for task in result.tasks:
-            status_icon = {
-                BuildStatus.COMPLETE: "✓",
-                BuildStatus.FAILED: "✗",
-                BuildStatus.BUILDING: "⏳",
-                BuildStatus.PENDING: "○",
-                BuildStatus.CANCELED: "⊘",
-            }.get(task.status, "?")
-
-            print(f"  {status_icon} {task.package_name}: {task.status.value}")
+            print(f"  {icons.get(task.status, '?')} {task.package_name}: {task.status.value}")
             if task.task_id:
                 print(f"      Task ID: {task.task_id}")
             if task.error_message:
@@ -424,19 +276,36 @@ def resolve_target_tags(
     return build_tag or info["build_tag"], info["dest_tag"]
 
 
-def cmd_analyze(
-    srpm_path: str,
-    server: str,
-    build_tag: str | None,
-    cert: str | None,
-    serverca: str | None,
-    no_ssl_verify: bool = False,
-    no_name_resolution: bool = False,
-    no_ml: bool = False,
-    ml_model_path: str | None = None,
-    build_all_deps: bool = False,
-    target: str | None = None,
-) -> int:
+def fedora_release(opts: argparse.Namespace, target: str | None) -> str:
+    """Release to fetch SRPMs from: --fedora-release, else the target's (f44), else rawhide."""
+    return opts.fedora_release or detect_fedora_release(target) or "rawhide"
+
+
+def name_resolver_for(opts: argparse.Namespace) -> PackageNameResolver | None:
+    """The name resolver the options ask for (None with --no-name-resolution)."""
+    if opts.no_name_resolution:
+        return None
+    return create_name_resolver(no_ml=opts.no_ml, ml_model_path=opts.ml_model)
+
+
+def ensure_srpm_path(opts: argparse.Namespace, srpm_arg: str, release: str) -> str:
+    """Path of the SRPM: srpm_arg itself if it is a file, else the downloaded package."""
+    p = Path(srpm_arg)
+    if p.exists():
+        return str(p.resolve())
+    logging.info("Downloading SRPM for: %s", srpm_arg)
+    fetcher = SRPMFetcher(
+        download_dir=opts.download_dir,
+        fedora_release=release,
+        no_ssl_verify=opts.no_ssl_verify,
+        name_resolver=name_resolver_for(opts),
+    )
+    path = fetcher.download_srpm(srpm_arg)
+    logging.info("Downloaded: %s", path)
+    return path
+
+
+def cmd_analyze(opts: argparse.Namespace, srpm_path: str, target: str | None) -> int:
     """Analyze SRPM dependencies the same way a build would, without downloading or building."""
     print(f"Analyzing: {srpm_path}")
 
@@ -452,25 +321,22 @@ def cmd_analyze(
             print(f"  - {req}")
 
         print("\nChecking availability in Koji...")
-
         koji_client = KojiClient(
-            server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
+            server=opts.server, serverca=opts.serverca, no_ssl_verify=opts.no_ssl_verify
         )
+        build_tag = opts.build_tag
         if not build_tag:
             if not target:
                 raise VibeBuildError("No build tag: pass --build-tag or a target")
             build_tag, _ = resolve_target_tags(koji_client, target)
         print(f"Build tag: {build_tag}")
-        name_resolver = None
-        if not no_name_resolution:
-            name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
+
         resolver = DependencyResolver(
             koji_client=koji_client,
             koji_tag=build_tag,
-            name_resolver=name_resolver,
-            build_all_deps=build_all_deps,
+            name_resolver=name_resolver_for(opts),
+            build_all_deps=opts.build_all_deps,
         )
-
         missing = resolver.find_missing_deps(package_info.build_requires)
 
         if missing:
@@ -479,183 +345,88 @@ def cmd_analyze(
                 print(f"  ✗ {dep}")
         else:
             print("\n✓ All dependencies available")
-
         return 0
 
     except Exception as e:
-        logging.error(f"Analysis failed: {e}")
+        logging.error("Analysis failed: %s", e)
         return 1
 
 
-def ensure_srpm_path(
-    srpm_arg: str,
-    download_dir: str | None,
-    no_ssl_verify: bool,
-    no_ml: bool,
-    ml_model_path: str | None,
-    fedora_release: str = "rawhide",
-) -> str:
-    """
-    Return path to an SRPM file. If srpm_arg is an existing path, return it.
-    Otherwise treat as package name, download SRPM, and return its path.
-    """
-    p = Path(srpm_arg)
-    if p.exists():
-        return str(p.resolve())
-    # Package name: download first
-    logging.info("Downloading SRPM for: %s", srpm_arg)
-    name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
-    fetcher = SRPMFetcher(
-        download_dir=download_dir,
-        fedora_release=fedora_release,
-        no_ssl_verify=no_ssl_verify,
-        name_resolver=name_resolver,
-    )
-    path = fetcher.download_srpm(srpm_arg)
-    logging.info("Downloaded: %s", path)
-    return path
-
-
-def cmd_download(
-    package_name: str,
-    download_dir: str | None,
-    no_ssl_verify: bool = False,
-    no_ml: bool = False,
-    ml_model_path: str | None = None,
-    fedora_release: str = "rawhide",
-) -> int:
+def cmd_download(opts: argparse.Namespace, package_name: str, release: str) -> int:
     """Download SRPM from Fedora."""
     print(f"Downloading SRPM for: {package_name}")
-
     try:
-        name_resolver = create_name_resolver(no_ml=no_ml, ml_model_path=ml_model_path)
         fetcher = SRPMFetcher(
-            download_dir=download_dir,
-            fedora_release=fedora_release,
-            no_ssl_verify=no_ssl_verify,
-            name_resolver=name_resolver,
+            download_dir=opts.download_dir,
+            fedora_release=release,
+            no_ssl_verify=opts.no_ssl_verify,
+            name_resolver=name_resolver_for(opts),
         )
         srpm_path = fetcher.download_srpm(package_name)
-
-        print(f"✓ Downloaded: {srpm_path}")
-        return 0
-
     except Exception as e:
-        logging.error(f"Download failed: {e}")
+        logging.error("Download failed: %s", e)
         return 1
+    print(f"✓ Downloaded: {srpm_path}")
+    return 0
 
 
-def cmd_build(
-    target: str,
-    srpm_path: str,
-    server: str,
-    web_url: str,
-    cert: str | None,
-    serverca: str | None,
-    build_tag: str | None,
-    scratch: bool,
-    nowait: bool,
-    no_deps: bool,
-    download_dir: str | None,
-    dry_run: bool,
-    no_ssl_verify: bool = False,
-    no_name_resolution: bool = False,
-    no_ml: bool = False,
-    ml_model_path: str | None = None,
-    fedora_release: str = "rawhide",
-    force: bool = False,
-    no_idempotency: bool = False,
-    build_all_deps: bool = False,
-    patch_specs: bool = False,
-) -> int:
-    """Build package with dependency resolution."""
-    srpm = Path(srpm_path)
-    if not srpm.exists():
-        logging.error(f"SRPM not found: {srpm_path}")
+def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: str) -> int:
+    """Build package with dependency resolution (or show the plan with --dry-run)."""
+    if not Path(srpm_path).exists():
+        logging.error("SRPM not found: %s", srpm_path)
         return 1
 
     try:
         koji_client = KojiClient(
-            server=server, cert=cert, serverca=serverca, no_ssl_verify=no_ssl_verify
+            server=opts.server, serverca=opts.serverca, no_ssl_verify=opts.no_ssl_verify
         )
-        build_tag, dest_tag = resolve_target_tags(koji_client, target, build_tag)
+        build_tag, dest_tag = resolve_target_tags(koji_client, target, opts.build_tag)
     except VibeBuildError as e:
-        logging.error(str(e))
+        logging.error("%s", e)
         return 1
 
     builder = KojiBuilder(
-        koji_server=server,
-        koji_web_url=web_url,
-        cert=cert,
-        serverca=serverca,
+        koji_server=opts.server,
         target=target,
         build_tag=build_tag,
-        scratch=scratch,
-        nowait=nowait,
-        download_dir=download_dir,
-        no_ssl_verify=no_ssl_verify,
-        no_name_resolution=no_name_resolution,
-        no_ml=no_ml,
-        ml_model_path=ml_model_path,
-        fedora_release=fedora_release,
-        force=force,
-        idempotent=not no_idempotency,
-        build_all_deps=build_all_deps,
         dest_tag=dest_tag,
-        patch_specs=patch_specs,
+        cert=opts.cert,
+        serverca=opts.serverca,
+        no_ssl_verify=opts.no_ssl_verify,
+        scratch=opts.scratch,
+        nowait=opts.nowait,
+        build_all_deps=opts.build_all_deps,
+        patch_specs=opts.patch_specs,
+        name_resolver=name_resolver_for(opts),
+        download_dir=opts.download_dir,
+        fedora_release=release,
     )
 
-    if dry_run:
-        print("DRY RUN - showing what would be built:\n")
-
-        package_info = get_package_info_from_srpm(str(srpm))
-        print(f"Target package: {package_info.nvr}")
-
-        if not no_deps:
-
-            def srpm_resolver(pkg: str) -> str | None:
-                try:
-                    return builder.fetcher.download_srpm(pkg)
-                except Exception:
-                    return None
-
-            builder.resolver.build_dependency_graph(
-                package_info.name, str(srpm), srpm_resolver=srpm_resolver
-            )
-
-            build_chain = builder.resolver.get_build_chain()
-
-            if build_chain:
-                print(f"\nDependencies to build ({sum(len(lvl) for lvl in build_chain)}):")
-                for level_idx, level in enumerate(build_chain):
-                    print(f"  Level {level_idx + 1}: {', '.join(level)}")
-                print(f"Then: {package_info.nvr}")
-            else:
-                print("\nNo dependencies to build")
-
-        return 0
-
     try:
-        if no_deps:
-            task = builder.build_package(str(srpm), wait=not nowait)
-            result = BuildResult(
-                success=task.status == BuildStatus.COMPLETE,
-                tasks=[task],
-                built_packages=[task.package_name] if task.status == BuildStatus.COMPLETE else [],
-                failed_packages=[task.package_name] if task.status != BuildStatus.COMPLETE else [],
-            )
-        else:
-            result = builder.build_with_deps(str(srpm))
+        if opts.dry_run:
+            print("DRY RUN - showing what would be built:\n")
+            nvr = get_package_info_from_srpm(srpm_path).nvr
+            print(f"Target package: {nvr}")
+            if not opts.no_deps:
+                build_chain = builder.resolve_build_chain(srpm_path)
+                if build_chain:
+                    print(f"\nDependencies to build ({sum(len(lvl) for lvl in build_chain)}):")
+                    for level_idx, level in enumerate(build_chain):
+                        print(f"  Level {level_idx + 1}: {', '.join(level)}")
+                    print(f"Then: {nvr}")
+                else:
+                    print("\nNo dependencies to build")
+            return 0
 
+        result = builder.build_with_deps(srpm_path, resolve_deps=not opts.no_deps)
         print_build_result(result)
-
         return 0 if result.success else 1
 
     except VibeBuildError as e:
-        logging.error(f"Build failed: {e}")
+        logging.error("Build failed: %s", e)
         return 1
     except Exception as e:
-        logging.exception(f"Unexpected error: {e}")
+        logging.exception("Unexpected error: %s", e)
         return 1
 
 
@@ -722,23 +493,19 @@ def _train_subcommand(argv: list[str]) -> int:
 def main(args: list[str] | None = None) -> int:
     """Main entry point.
 
-    Positional argument resolution:
+    Positional arguments:
       vibebuild SRPM          -- target is read from ~/.koji/config [koji]
-      vibebuild TARGET SRPM   -- explicit target (backwards-compatible)
+      vibebuild TARGET SRPM   -- explicit target
       vibebuild train [...]   -- train the ML resolver
     """
     argv = list(args) if args is not None else sys.argv[1:]
 
-    # Early dispatch for the train subcommand, so as not to break the positional layout
+    # `train` is dispatched before parsing, so it does not clash with TARGET/SRPM
     if argv and argv[0] == "train":
         return _train_subcommand(argv[1:])
 
     parser = create_parser()
     opts = parser.parse_args(argv)
-
-    if getattr(opts, "help_all", False):
-        print(parser.format_help())
-        return 0
 
     setup_logging(opts.verbose, opts.quiet, json_logs=(opts.log_format == "json"))
 
@@ -747,130 +514,42 @@ def main(args: list[str] | None = None) -> int:
 
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    # With one positional argument it is the SRPM and the target comes from the config
+    if opts.srpm:
+        target, srpm_arg = opts.target, opts.srpm
+    else:
+        target, srpm_arg = load_koji_config()["target"], opts.target
+    release = fedora_release(opts, target)
+
+    if opts.download_only:
+        if not srpm_arg:
+            parser.error("--download-only requires package name")
+        return cmd_download(opts, srpm_arg, release)
+
     if opts.analyze_only:
-        srpm_arg = opts.srpm or opts.target
         if not srpm_arg:
             parser.error("--analyze-only requires SRPM path or package name")
-        # vibebuild --analyze-only [TARGET] SRPM: the target only gives the build tag
-        analyze_target = opts.target if opts.srpm else load_koji_config().get("target")
-        if not opts.build_tag and not analyze_target:
+        if not opts.build_tag and not target:
             parser.error(
                 "--analyze-only needs a build tag: pass --build-tag, a target "
                 "(vibebuild --analyze-only TARGET SRPM) or 'target' in ~/.koji/config"
             )
-
-        # Determine fedora_release for potential download
-        analyze_release = getattr(opts, "fedora_release", None) or "rawhide"
-
-        try:
-            srpm_path = ensure_srpm_path(
-                srpm_arg,
-                opts.download_dir,
-                opts.no_ssl_verify,
-                getattr(opts, "no_ml", False),
-                getattr(opts, "ml_model", None),
-                fedora_release=analyze_release,
-            )
-        except Exception as e:
-            logging.error("Failed to obtain SRPM: %s", e)
-            return 1
-
-        return cmd_analyze(
-            srpm_path,
-            opts.server,
-            opts.build_tag,
-            opts.cert,
-            opts.serverca,
-            opts.no_ssl_verify,
-            no_name_resolution=getattr(opts, "no_name_resolution", False),
-            no_ml=getattr(opts, "no_ml", False),
-            ml_model_path=getattr(opts, "ml_model", None),
-            build_all_deps=getattr(opts, "build_all_deps", False),
-            target=analyze_target,
-        )
-
-    if opts.download_only:
-        package_name = opts.srpm or opts.target
-        if not package_name:
-            parser.error("--download-only requires package name")
-        dl_release = getattr(opts, "fedora_release", None) or "rawhide"
-        return cmd_download(
-            package_name,
-            opts.download_dir,
-            opts.no_ssl_verify,
-            no_ml=getattr(opts, "no_ml", False),
-            ml_model_path=getattr(opts, "ml_model", None),
-            fedora_release=dl_release,
-        )
-
-    # Resolve target and srpm from positional arguments:
-    #   vibebuild SRPM          -> target from ~/.koji/config
-    #   vibebuild TARGET SRPM   -> explicit target (backwards-compatible)
-    koji_cfg = load_koji_config()
-    if opts.target and opts.srpm:
-        target = opts.target
-        srpm_arg = opts.srpm
-    elif opts.target and not opts.srpm:
-        srpm_arg = opts.target
-        target = koji_cfg.get("target")
     else:
-        target = None
-        srpm_arg = None
-
-    if not srpm_arg:
-        parser.error("SRPM (or package name) is required for building")
-
-    if not target:
-        parser.error(
-            "Build target not specified.\n"
-            "  Option 1: vibebuild TARGET PACKAGE\n"
-            "  Option 2: Add 'target = fedora-target' to ~/.koji/config under [koji]"
-        )
-
-    # Determine fedora_release: explicit flag > auto-detect from target > rawhide
-    fedora_release = getattr(opts, "fedora_release", None)
-    if not fedora_release:
-        fedora_release = detect_fedora_release(target)
-    if not fedora_release:
-        fedora_release = "rawhide"
+        if not srpm_arg:
+            parser.error("SRPM (or package name) is required for building")
+        if not target:
+            parser.error(
+                "Build target not specified.\n"
+                "  Option 1: vibebuild TARGET PACKAGE\n"
+                "  Option 2: Add 'target = f44' to ~/.koji/config under [koji]"
+            )
 
     try:
-        srpm_path = ensure_srpm_path(
-            srpm_arg,
-            opts.download_dir,
-            opts.no_ssl_verify,
-            getattr(opts, "no_ml", False),
-            getattr(opts, "ml_model", None),
-            fedora_release=fedora_release,
-        )
+        srpm_path = ensure_srpm_path(opts, srpm_arg, release)
     except Exception as e:
-        logging.error("Download failed: %s", e)
+        logging.error("Failed to obtain SRPM: %s", e)
         return 1
 
-    return cmd_build(
-        target=target,
-        srpm_path=srpm_path,
-        server=opts.server,
-        web_url=opts.web_url,
-        cert=opts.cert,
-        serverca=opts.serverca,
-        build_tag=opts.build_tag,
-        scratch=opts.scratch,
-        nowait=opts.nowait,
-        no_deps=opts.no_deps,
-        download_dir=opts.download_dir,
-        dry_run=opts.dry_run,
-        no_ssl_verify=opts.no_ssl_verify,
-        no_name_resolution=getattr(opts, "no_name_resolution", False),
-        no_ml=getattr(opts, "no_ml", False),
-        ml_model_path=getattr(opts, "ml_model", None),
-        fedora_release=fedora_release,
-        force=getattr(opts, "force", False),
-        no_idempotency=getattr(opts, "no_idempotency", False),
-        build_all_deps=getattr(opts, "build_all_deps", False),
-        patch_specs=getattr(opts, "patch_specs", False),
-    )
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    if opts.analyze_only:
+        return cmd_analyze(opts, srpm_path, target)
+    return cmd_build(opts, target, srpm_path, release)
