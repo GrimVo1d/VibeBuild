@@ -236,7 +236,7 @@ class KojiSession:
             session.packageListAdd(dest_tag, package, owner=self.user)
         except koji.GenericError as exc:
             if "already" not in str(exc).lower():
-                raise KojiBuildError(f"packageListAdd failed: {exc}")
+                raise KojiBuildError(f"packageListAdd failed: {exc}") from exc
 
         server_dir = f"cli-build/vibebuild-{uuid.uuid4().hex[:12]}"
         session.uploadWrapper(str(srpm), server_dir)
@@ -247,7 +247,7 @@ class KojiSession:
             msg = str(exc)
             if "Build already exists" in msg and "state=COMPLETE" in msg:
                 return None
-            raise KojiBuildError(f"Build submission failed: {exc}")
+            raise KojiBuildError(f"Build submission failed: {exc}") from exc
 
     def task_state(self, task_id: int) -> str | None:
         """State name of a task, or None if the hub could not be asked."""

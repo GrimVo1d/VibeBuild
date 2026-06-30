@@ -209,7 +209,7 @@ class MLPackageResolver:
         # (prefer python3- over python3.13-; shorter is better).
         in_srpm = [
             (self._rpm_names[int(i)], float(d))
-            for i, d in zip(indices[0], distances[0])
+            for i, d in zip(indices[0], distances[0], strict=True)
             if self._srpm_names[int(i)] == best_srpm and float(d) <= self.confidence_threshold
         ]
         in_srpm.sort(key=lambda t: (_canonical_score(t[0]), t[1]))

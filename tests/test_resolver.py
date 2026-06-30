@@ -18,7 +18,6 @@ class TestDependencyNode:
         assert node.package_info is None
         assert node.dependencies == []
         assert node.is_available is False
-        assert node.build_order == -1
 
     def test_with_all_values(self):
         node = DependencyNode(
@@ -26,14 +25,12 @@ class TestDependencyNode:
             srpm_path="/path/to/test.src.rpm",
             dependencies=["dep1", "dep2"],
             is_available=True,
-            build_order=5,
         )
 
         assert node.name == "test-pkg"
         assert node.srpm_path == "/path/to/test.src.rpm"
         assert node.dependencies == ["dep1", "dep2"]
         assert node.is_available is True
-        assert node.build_order == 5
 
 
 class TestDependencyResolver:
@@ -60,17 +57,6 @@ class TestDependencyResolver:
         _ = resolver.available_packages
 
         mock_koji_client.list_packages.assert_called_once()
-
-    def test_refresh_available_packages(self, mock_koji_client):
-        mock_koji_client.list_packages.return_value = ["python3"]
-        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="fedora-build")
-        _ = resolver.available_packages
-        resolver.refresh_available_packages()
-        mock_koji_client.list_packages.return_value = ["python3", "gcc"]
-        result = resolver.available_packages
-
-        assert mock_koji_client.list_packages.call_count == 2
-        assert "gcc" in result
 
     def test_find_missing_deps_all_available(self, mock_koji_client):
         mock_koji_client.list_packages.return_value = ["python3", "gcc", "make"]
@@ -263,22 +249,6 @@ class TestDependencyResolver:
         dep_level = next(i for i, level in enumerate(result) if "dep1" in level or "dep2" in level)
         main_level = next(i for i, level in enumerate(result) if "main" in level)
         assert base_level < dep_level < main_level
-
-    def test_get_missing_packages(self, mock_koji_client):
-        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="fedora-build")
-        resolver._dependency_graph = {
-            "with-srpm": DependencyNode(
-                name="with-srpm", srpm_path="/path/to.src.rpm", is_available=False
-            ),
-            "no-srpm": DependencyNode(name="no-srpm", srpm_path=None, is_available=False),
-            "available": DependencyNode(name="available", is_available=True),
-        }
-
-        result = resolver.get_missing_packages()
-
-        assert "no-srpm" in result
-        assert "with-srpm" not in result
-        assert "available" not in result
 
 
 class TestDependencyResolverWithNameResolver:

@@ -11,14 +11,6 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-# Try to import ML resolver; it may not be installed
-try:
-    from vibebuild.ml_resolver import MLPackageResolver  # noqa: F401
-
-    HAS_ML = True
-except ImportError:  # pragma: no cover
-    HAS_ML = False
-
 # Known RPM system macros for expanding %{...} in dependency names
 SYSTEM_MACROS: dict[str, str] = {
     "python3_pkgversion": "3",

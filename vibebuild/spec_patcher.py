@@ -31,7 +31,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from vibebuild.exceptions import VibeBuildError
+from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +125,9 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
             with tarfile.open(fileobj=proc.stdout, mode="r|gz") as archive:
                 archive.extractall(dest, filter="data")
             _, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             proc.kill()
-            raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}")
+            raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}") from exc
         except (tarfile.TarError, OSError) as exc:
             proc.kill()
             raise VibeBuildError(f"Cannot extract {srpm.name}: {exc}") from exc
@@ -221,7 +221,7 @@ def patch_srpm(
     """
     srpm = Path(srpm_path).resolve()
     if not srpm.is_file():
-        raise VibeBuildError(f"SRPM not found: {srpm}")
+        raise SRPMNotFoundError(f"SRPM not found: {srpm}")
 
     target = Path(tempfile.mkdtemp(prefix="vibebuild-patch-"))
     try:
@@ -278,8 +278,8 @@ def _patch_into(srpm: Path, target: Path, timeout: int, add_unpackaged_macro: bo
         result = subprocess.run(
             _sandboxed(cmd, target), capture_output=True, text=True, timeout=timeout
         )
-    except subprocess.TimeoutExpired:
-        raise VibeBuildError(f"rpmbuild -bs timed out for {srpm.name}")
+    except subprocess.TimeoutExpired as exc:
+        raise VibeBuildError(f"rpmbuild -bs timed out for {srpm.name}") from exc
     if result.returncode != 0:
         raise VibeBuildError(
             f"rpmbuild -bs failed for {srpm.name}: {result.stderr.strip() or result.stdout.strip()}"

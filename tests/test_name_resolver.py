@@ -371,7 +371,7 @@ class TestProvidePatterns:
     """Test that PROVIDE_PATTERNS list is well-formed."""
 
     def test_patterns_are_compiled(self):
-        for pattern, fn in PROVIDE_PATTERNS:
+        for pattern, _fn in PROVIDE_PATTERNS:
             assert hasattr(pattern, "match"), f"Pattern {pattern} is not compiled"
 
     def test_patterns_count(self):

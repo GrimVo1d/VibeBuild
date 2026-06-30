@@ -200,7 +200,7 @@ def download_and_parse_primary(primary_url: str) -> list[dict]:
         stream, close_stream = _open_primary_stream(tmp_path)
         # Use iterparse for memory efficiency on large XML
         context = ET.iterparse(stream, events=("end",))
-        for event, elem in context:
+        for _event, elem in context:
             if elem.tag == f"{{{COMMON_NS}}}package" and elem.get("type") == "rpm":
                 rpm_name = _extract_text(elem, f"{{{COMMON_NS}}}name")
                 arch = _extract_text(elem, f"{{{COMMON_NS}}}arch")

@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 
 from vibebuild.analyzer import get_build_requires, get_package_info_from_srpm
-from vibebuild.exceptions import KojiBuildError
+from vibebuild.exceptions import KojiBuildError, SRPMNotFoundError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient, KojiSession, poll_interval, task_state_name
 from vibebuild.name_resolver import PackageNameResolver
@@ -138,7 +138,7 @@ class KojiBuilder:
         """
         srpm = Path(srpm_path)
         if not srpm.exists():
-            raise FileNotFoundError(f"SRPM not found: {srpm}")
+            raise SRPMNotFoundError(f"SRPM not found: {srpm}")
 
         # With patch_specs the spec loses %check (upstream testsuites may need network
         # or process limits our buildroot lacks). The macro
@@ -364,7 +364,7 @@ class KojiBuilder:
             BuildResult with all build information
         """
         if not Path(srpm_path).exists():
-            raise FileNotFoundError(f"SRPM not found: {srpm_path}")
+            raise SRPMNotFoundError(f"SRPM not found: {srpm_path}")
         logger.info("Starting vibebuild for: %s", srpm_path)
         with self.hub:
             return self._build_with_deps(str(srpm_path), resolve_deps)

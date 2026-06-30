@@ -5,6 +5,7 @@ Dependency resolver - checks dependencies in Koji and builds DAG.
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -39,11 +40,9 @@ def _compare_versions(a: tuple[str, str, str], b: tuple[str, str, str]) -> int:
         if x == y:
             continue
         # Compare tokens split into digits/letters
-        import re as _re
-
-        xa = _re.findall(r"\d+|[A-Za-z]+", x)
-        ya = _re.findall(r"\d+|[A-Za-z]+", y)
-        for xs, ys in zip(xa, ya):
+        xa = re.findall(r"\d+|[A-Za-z]+", x)
+        ya = re.findall(r"\d+|[A-Za-z]+", y)
+        for xs, ys in zip(xa, ya, strict=False):
             if xs.isdigit() and ys.isdigit():
                 ix, iy = int(xs), int(ys)
                 if ix != iy:
@@ -74,7 +73,6 @@ class DependencyNode:
     package_info: PackageInfo | None = None
     dependencies: list[str] = field(default_factory=list)
     is_available: bool = False
-    build_order: int = -1
 
 
 class DependencyResolver:
@@ -112,10 +110,6 @@ class DependencyResolver:
         if self._available_packages is None:
             self._available_packages = set(self.koji.list_packages(self.koji_tag))
         return self._available_packages
-
-    def refresh_available_packages(self) -> None:
-        """Force refresh of available packages cache."""
-        self._available_packages = None
 
     def _check_external_repos(self) -> bool:
         """Check if the build tag has external repos configured (cached)."""
@@ -210,15 +204,12 @@ class DependencyResolver:
                     pass
         self.koji.prefetch_latest_builds([n for n in names if isinstance(n, str)], self.koji_tag)
 
-    def find_missing_deps(
-        self, deps: Sequence[str | BuildRequirement], check_provides: bool = True
-    ) -> list[str]:
+    def find_missing_deps(self, deps: Sequence[str | BuildRequirement]) -> list[str]:
         """
         Find dependencies that are not available in Koji tag.
 
         Args:
             deps: List of dependency names or BuildRequirement objects
-            check_provides: Also check if dep is provided by another package
 
         Returns:
             List of missing package names
@@ -381,7 +372,7 @@ class DependencyResolver:
                     else:
                         dep_srpms = [None] * len(missing)
 
-                    for dep, dep_srpm in zip(missing, dep_srpms):
+                    for dep, dep_srpm in zip(missing, dep_srpms, strict=True):
                         resolve_deps(dep, dep_srpm)
 
                 except Exception as exc:
@@ -429,7 +420,6 @@ class DependencyResolver:
         ]
 
         result = []
-        order = 0
 
         while queue:
             pkg = queue.pop(0)
@@ -438,8 +428,6 @@ class DependencyResolver:
                 pkg in self._dependency_graph and not self._dependency_graph[pkg].is_available
             ):  # pragma: no branch
                 result.append(pkg)
-                self._dependency_graph[pkg].build_order = order
-                order += 1
 
             for dependent in adj.get(pkg, []):
                 in_degree[dependent] -= 1
@@ -495,11 +483,3 @@ class DependencyResolver:
                 chains[level].append(pkg)
 
         return [chain for chain in chains if chain]
-
-    def get_missing_packages(self) -> list[str]:
-        """Get list of packages that need to be built."""
-        return [
-            name
-            for name, node in self._dependency_graph.items()
-            if not node.is_available and node.srpm_path is None
-        ]

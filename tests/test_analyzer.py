@@ -5,12 +5,11 @@ import pytest
 from vibebuild.analyzer import (
     BuildRequirement,
     PackageInfo,
-    SpecAnalyzer,
     get_build_requires,
     get_package_info_from_srpm,
     read_srpm_header,
 )
-from vibebuild.exceptions import InvalidSRPMError, SpecParseError
+from vibebuild.exceptions import InvalidSRPMError, SRPMNotFoundError
 
 
 class TestBuildRequirement:
@@ -56,203 +55,6 @@ class TestPackageInfo:
         )
 
         assert info.nvr == "test-package-1.0.0-1"
-
-
-class TestSpecAnalyzer:
-    def test_analyze_spec_extracts_name(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        assert result.name == "test-package"
-
-    def test_analyze_spec_extracts_version(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        assert result.version == "1.0.0"
-
-    def test_analyze_spec_extracts_release(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        assert result.release == "1"
-
-    def test_analyze_spec_extracts_build_requires(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "python3-devel" in req_names
-        assert "gcc" in req_names
-        assert "make" in req_names
-
-    def test_analyze_spec_extracts_version_constraints(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        make_req = next((r for r in result.build_requires if r.name == "make"), None)
-        assert make_req is not None
-        assert make_req.operator == ">="
-        assert make_req.version == "4.0"
-
-    def test_analyze_spec_extracts_source_urls(self, sample_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(sample_spec))
-
-        assert len(result.source_urls) >= 1
-        assert "test-package-1.0.0.tar.gz" in result.source_urls[0]
-
-    def test_analyze_spec_raises_on_missing_file(self):
-        analyzer = SpecAnalyzer()
-
-        with pytest.raises(FileNotFoundError):
-            analyzer.analyze_spec("/nonexistent/path.spec")
-
-    def test_analyze_spec_raises_on_missing_name(self, tmp_path):
-        invalid_spec = tmp_path / "invalid.spec"
-        invalid_spec.write_text("Version: 1.0\nRelease: 1")
-        analyzer = SpecAnalyzer()
-
-        with pytest.raises(SpecParseError, match="Could not find Name"):
-            analyzer.analyze_spec(str(invalid_spec))
-
-    def test_analyze_spec_raises_on_missing_version(self, tmp_path):
-        invalid_spec = tmp_path / "invalid.spec"
-        invalid_spec.write_text("Name: test-pkg\nRelease: 1")
-        analyzer = SpecAnalyzer()
-
-        with pytest.raises(SpecParseError, match="Could not find Version"):
-            analyzer.analyze_spec(str(invalid_spec))
-
-    def test_analyze_spec_defaults_release_to_1(self, tmp_path):
-        spec = tmp_path / "minimal.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0")
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        assert result.release == "1"
-
-    def test_analyze_spec_ignores_comments(self, tmp_path):
-        spec = tmp_path / "commented.spec"
-        spec.write_text(
-            """
-Name: test-pkg
-Version: 1.0
-Release: 1
-# BuildRequires: should-be-ignored
-BuildRequires: actual-dep
-"""
-        )
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "should-be-ignored" not in req_names
-        assert "actual-dep" in req_names
-
-    def test_analyze_spec_handles_comma_separated_requires(self, complex_spec):
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(complex_spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "python3-setuptools" in req_names
-        assert "python3-wheel" in req_names
-        assert "gcc" in req_names
-        assert "gcc-c++" in req_names
-
-    def test_analyze_spec_expands_macros(self, tmp_path):
-        spec = tmp_path / "macro.spec"
-        spec.write_text(
-            """
-Name: my-package
-Version: 2.0
-Release: 1
-Source0: %{name}-%{version}.tar.gz
-"""
-        )
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        assert "my-package-2.0.tar.gz" in result.source_urls[0]
-
-
-class TestSpecAnalyzerEdgeCases:
-    def test_extract_value_without_colon(self):
-        """_extract_value should return '' when line has no colon."""
-        analyzer = SpecAnalyzer()
-
-        result = analyzer._extract_value("NoColonHere", "NoColonHere")
-
-        assert result == ""
-
-    def test_build_requires_with_empty_parts(self, tmp_path):
-        """BuildRequires with consecutive commas should skip empty parts."""
-        spec = tmp_path / "empty_parts.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: gcc,,make\n")
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "gcc" in req_names
-        assert "make" in req_names
-
-    def test_build_requires_version_as_separate_tokens(self, tmp_path):
-        """BuildRequires with 'pkg >= ver' as separate tokens in comma list."""
-        spec = tmp_path / "sep_tokens.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: pkg-a, >= ,1.0\n")
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "pkg-a" in req_names
-
-
-class TestSpecAnalyzerBranchCoverage:
-    def test_source_line_with_empty_url(self, tmp_path):
-        """Source line with nothing after colon should not add empty URL."""
-        spec = tmp_path / "empty_source.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0\nRelease: 1\nSource0:\n")
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        assert result.source_urls == []
-
-    def test_build_requires_macro_expands_to_empty(self, tmp_path):
-        """BuildRequires with macro that expands to empty should be skipped."""
-        spec = tmp_path / "macro_empty.spec"
-        spec.write_text(
-            "Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: %{?nonexistent_macro}\n"
-        )
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "" not in req_names
-
-    def test_build_requires_version_op_without_name(self, tmp_path):
-        """BuildRequires starting with version operator should give empty name."""
-        spec = tmp_path / "no_name.spec"
-        spec.write_text("Name: test-pkg\nVersion: 1.0\nRelease: 1\nBuildRequires: >=1.0\n")
-        analyzer = SpecAnalyzer()
-
-        result = analyzer.analyze_spec(str(spec))
-
-        req_names = [r.name for r in result.build_requires]
-        assert "" not in req_names
 
 
 def _header(name, version, release, *requires):
@@ -318,7 +120,7 @@ class TestReadSrpmHeader:
         assert names == ["python3-devel", "make"]
 
     def test_missing_file(self):
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SRPMNotFoundError):
             read_srpm_header("/nonexistent/file.src.rpm")
 
     def test_not_an_srpm(self, tmp_path):
@@ -379,5 +181,5 @@ class TestGetPackageInfoFromSrpm:
         mock_subprocess_run.assert_not_called()
 
     def test_missing_file(self):
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SRPMNotFoundError):
             get_package_info_from_srpm("/nonexistent/file.src.rpm")

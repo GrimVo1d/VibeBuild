@@ -32,7 +32,7 @@ def hub(mocker):
 class TestKojiClient:
     def test_session_verifies_with_serverca(self, mocker):
         cls = mocker.patch("vibebuild.koji_client.koji.ClientSession")
-        KojiClient(server="https://hub/kojihub", serverca="/ca.crt").session
+        _ = KojiClient(server="https://hub/kojihub", serverca="/ca.crt").session
 
         assert cls.call_args.args[0] == "https://hub/kojihub"
         assert cls.call_args.kwargs["opts"]["serverca"] == "/ca.crt"
@@ -40,7 +40,7 @@ class TestKojiClient:
 
     def test_session_no_ssl_verify(self, mocker):
         cls = mocker.patch("vibebuild.koji_client.koji.ClientSession")
-        KojiClient(HUB, serverca="/ca.crt", no_ssl_verify=True).session
+        _ = KojiClient(HUB, serverca="/ca.crt", no_ssl_verify=True).session
 
         assert cls.call_args.kwargs["opts"]["no_ssl_verify"] is True
         assert "serverca" not in cls.call_args.kwargs["opts"]

@@ -12,7 +12,7 @@ from vibebuild.builder import (
     BuildTask,
     KojiBuilder,
 )
-from vibebuild.exceptions import KojiBuildError
+from vibebuild.exceptions import KojiBuildError, SRPMNotFoundError
 from vibebuild.resolver import DependencyNode
 
 
@@ -169,7 +169,7 @@ class TestKojiBuilder:
     def test_build_package_file_not_found(self):
         builder = make_builder()
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SRPMNotFoundError):
             builder.build_package("/nonexistent/path.src.rpm")
 
     def test_build_package_failure(self, tmp_path, mock_koji_session):
@@ -280,7 +280,7 @@ class TestSubmitBuild:
     def test_submit_build_file_not_found(self):
         builder = make_builder()
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SRPMNotFoundError):
             builder._submit_build("/nonexistent/path.src.rpm")
 
     def test_submit_build_failure_raises(self, tmp_path, mock_koji_session):
@@ -518,7 +518,7 @@ class TestKojiBuilderBuildWithDeps:
     def test_build_with_deps_file_not_found(self):
         builder = make_builder()
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SRPMNotFoundError):
             builder.build_with_deps("/nonexistent/path.src.rpm")
 
     def test_build_with_deps_returns_time(self, tmp_path, mock_subprocess_run):

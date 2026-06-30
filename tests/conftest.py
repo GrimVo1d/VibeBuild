@@ -3,7 +3,6 @@ Pytest configuration and fixtures for VibeBuild tests.
 """
 
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
 # Make `import koji` work even without the package installed (macOS dev).
@@ -29,24 +28,6 @@ def _no_retry_sleep(monkeypatch):
         monkeypatch.setattr(_r.time, "sleep", lambda _s: None)
     except ImportError:
         pass
-
-
-@pytest.fixture
-def fixtures_dir():
-    """Path to test fixtures directory."""
-    return Path(__file__).parent / "fixtures"
-
-
-@pytest.fixture
-def sample_spec(fixtures_dir):
-    """Path to test-package.spec fixture file."""
-    return fixtures_dir / "test-package.spec"
-
-
-@pytest.fixture
-def complex_spec(fixtures_dir):
-    """Path to complex-package.spec fixture file."""
-    return fixtures_dir / "complex-package.spec"
 
 
 @pytest.fixture
