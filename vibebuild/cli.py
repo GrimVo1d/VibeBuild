@@ -12,6 +12,7 @@ Fedora Koji first. Without TARGET, 'target' from ~/.koji/config [koji] is used.
 
 import argparse
 import configparser
+import json
 import logging
 import os
 import re
@@ -24,6 +25,7 @@ from vibebuild.builder import BuildResult, BuildStatus, KojiBuilder
 from vibebuild.exceptions import VibeBuildError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient
+from vibebuild.ml_resolver import default_model_path
 from vibebuild.name_resolver import PackageNameResolver, create_name_resolver
 from vibebuild.resolver import DependencyResolver
 
@@ -190,7 +192,9 @@ Examples:
         "--no-ml", action="store_true", help="Disable ML-based package name resolution"
     )
     build_group.add_argument(
-        "--ml-model", metavar="PATH", help="Path to ML model file (default: built-in)"
+        "--ml-model",
+        metavar="PATH",
+        help=f"ML model trained with 'vibebuild train' (default: {default_model_path()})",
     )
 
     mode_group = parser.add_argument_group("Mode options")
@@ -431,24 +435,22 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
 
 
 def _train_subcommand(argv: list[str]) -> int:
-    """Subcommand: vibebuild train [...]. Runs the full ML pipeline."""
+    """vibebuild train: collect training data from Fedora repodata and train the ML model."""
     sub = argparse.ArgumentParser(
         prog="vibebuild train",
-        description=(
-            "Train the ML resolver: collect training data from Fedora repodata and train the model"
-        ),
+        description="Train the ML name resolver on the provides of a Fedora release",
     )
-    sub.add_argument("--release", type=int, default=42, help="Fedora release (default 42)")
+    source = sub.add_mutually_exclusive_group(required=True)
+    source.add_argument("--release", help="Fedora release to collect data from (44, rawhide)")
+    source.add_argument("--data", metavar="FILE", help="Train on data saved with --save-data")
     sub.add_argument("--arch", default="x86_64", help="Architecture (default x86_64)")
     sub.add_argument(
         "--output",
-        default=str(Path(__file__).parent / "data" / "model.joblib"),
-        help="Where to save the model",
+        metavar="FILE",
+        default=str(default_model_path()),
+        help="Where to save the model (default: %(default)s)",
     )
-    sub.add_argument("--raw-path", default=None, help="Path to the raw dataset (default tmpfile)")
-    sub.add_argument(
-        "--keep-raw", action="store_true", help="Do not delete the raw dataset after training"
-    )
+    sub.add_argument("--save-data", metavar="FILE", help="Also save the collected data")
     sub.add_argument("--test-split", type=float, default=0.05, help="Fraction used for testing")
     sub.add_argument(
         "--eval-sample", type=int, default=500, help="How many random test samples to evaluate"
@@ -459,29 +461,27 @@ def _train_subcommand(argv: list[str]) -> int:
 
     setup_logging(opts.verbose, False)
 
-    try:
-        from vibebuild.training import collect_and_train
-    except ImportError as exc:
-        print(f"ERROR: failed to import vibebuild.training: {exc}", file=sys.stderr)
-        return 2
+    from vibebuild import training
 
     try:
-        metrics = collect_and_train(
-            release=opts.release,
-            arch=opts.arch,
-            output=opts.output,
-            raw_path=opts.raw_path,
-            keep_raw=opts.keep_raw,
+        if opts.data:
+            data = training.load_training_data(opts.data)
+        else:
+            data = training.collect(opts.release, opts.arch)
+            if opts.save_data:
+                Path(opts.save_data).write_text(json.dumps(data), encoding="utf-8")
+        metrics = training.train(
+            data,
+            opts.output,
             test_split=opts.test_split,
             eval_sample=opts.eval_sample,
             seed=opts.seed,
         )
-    except Exception as exc:
-        print(f"ERROR: training failed: {exc}", file=sys.stderr)
+    except (VibeBuildError, OSError) as exc:
+        logging.error("Training failed: %s", exc)
         return 1
 
-    print("=== Training finished ===")
-    print(f"Train: {metrics.get('train_size')}, Test: {metrics.get('test_size')}")
+    print(f"Train: {metrics['train_size']}, Test: {metrics['test_size']}")
     if "predicted" in metrics:
         print(f"Coverage: {metrics['coverage'] * 100:.1f}%")
         print(f"RPM accuracy: {metrics['rpm_accuracy'] * 100:.1f}%")

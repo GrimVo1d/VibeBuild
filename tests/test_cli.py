@@ -1,5 +1,6 @@
 """Tests for vibebuild.cli module."""
 
+import json
 import logging
 from pathlib import Path
 from unittest.mock import ANY, patch
@@ -657,29 +658,58 @@ class TestLoadKojiConfig:
 class TestTrainSubcommand:
     """The vibebuild train subcommand."""
 
-    def test_train_help_exits_zero(self, capsys):
+    METRICS = {
+        "train_size": 100,
+        "test_size": 10,
+        "predicted": 9,
+        "coverage": 0.9,
+        "rpm_accuracy": 0.5,
+        "srpm_accuracy": 0.7,
+    }
+
+    def test_help(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
             main(["train", "--help"])
+
         assert exc_info.value.code == 0
         out = capsys.readouterr().out
         assert "vibebuild train" in out
         assert "--release" in out
 
-    def test_train_calls_collect_and_train(self, mocker):
-        mock_cat = mocker.patch(
-            "vibebuild.training.collect_and_train",
-            return_value={
-                "train_size": 100,
-                "test_size": 10,
-                "predicted": 9,
-                "coverage": 0.9,
-                "rpm_accuracy": 0.5,
-                "srpm_accuracy": 0.7,
-            },
+    def test_needs_release_or_data(self):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["train"])
+
+        assert exc_info.value.code == 2
+
+    def test_collect_and_train(self, mocker, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        collect = mocker.patch("vibebuild.training.collect", return_value=[{"provide": "x"}])
+        train = mocker.patch("vibebuild.training.train", return_value=self.METRICS)
+        saved = tmp_path / "data.json"
+
+        assert main(["train", "--release", "44", "--save-data", str(saved)]) == 0
+
+        collect.assert_called_once_with("44", "x86_64")
+        assert train.call_args.args == ([{"provide": "x"}], str(tmp_path / "vibebuild/model.npz"))
+        assert json.loads(saved.read_text()) == [{"provide": "x"}]
+        assert "SRPM accuracy: 70.0%" in capsys.readouterr().out
+
+    def test_train_from_saved_data(self, mocker):
+        load = mocker.patch("vibebuild.training.load_training_data", return_value=[{"p": 1}])
+        collect = mocker.patch("vibebuild.training.collect")
+        train = mocker.patch(
+            "vibebuild.training.train", return_value={"train_size": 1, "test_size": 0}
         )
-        rc = main(["train", "--release", "42", "--output", "/tmp/m.joblib"])
-        assert rc == 0
-        mock_cat.assert_called_once()
-        kwargs = mock_cat.call_args.kwargs
-        assert kwargs["release"] == 42
-        assert kwargs["output"] == "/tmp/m.joblib"
+
+        assert main(["train", "--data", "d.json", "--output", "/m.npz", "--seed", "7"]) == 0
+
+        load.assert_called_once_with("d.json")
+        collect.assert_not_called()
+        assert train.call_args.args == ([{"p": 1}], "/m.npz")
+        assert train.call_args.kwargs["seed"] == 7
+
+    def test_failure(self, mocker):
+        mocker.patch("vibebuild.training.collect", side_effect=VibeBuildError("no mirror"))
+
+        assert main(["train", "--release", "44"]) == 1

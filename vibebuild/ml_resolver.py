@@ -5,34 +5,43 @@ Resolves virtual dependency names (e.g. python3dist(requests), pkgconfig(glib-2.
 to real RPM package names using a trained model.
 
 scikit-learn is an optional dependency - the resolver degrades gracefully if not installed.
+
+The model is a NumPy .npz archive of plain arrays (names, TF-IDF vocabulary and
+idf weights), loaded with allow_pickle=False, so a model file cannot run code when
+it is loaded. The TF-IDF matrix is not stored: it is recomputed on load (about
+10 s for a full Fedora release), which keeps the file at ~16 MB instead of ~280 MB.
 """
 
-import hashlib
-import json
+import importlib.util
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
 
-try:
-    import joblib  # pragma: no cover
-    from sklearn.feature_extraction.text import TfidfVectorizer  # pragma: no cover
-    from sklearn.neighbors import NearestNeighbors  # pragma: no cover
+from vibebuild.exceptions import VibeBuildError
 
-    HAS_SKLEARN = True  # pragma: no cover
-except ImportError:  # pragma: no cover
-    HAS_SKLEARN = False
+# scikit-learn (with numpy and scipy) is imported only when a model is used:
+# importing it costs about a second on every CLI start.
+HAS_SKLEARN = importlib.util.find_spec("sklearn") is not None
 
 logger = logging.getLogger(__name__)
 
-# Default paths
-_MODULE_DIR = Path(__file__).parent
-_DEFAULT_MODEL_PATH = _MODULE_DIR / "data" / "model.joblib"
-_CACHE_DIR = Path.home() / ".cache" / "vibebuild"
-_CACHE_FILE = _CACHE_DIR / "ml_name_cache.json"
+MODEL_FORMAT = 2
+
+# TF-IDF settings; stored in the model and checked on load
+_NGRAM_RANGE = (2, 5)
+_MAX_FEATURES = 20000
+_N_NEIGHBORS = 10
 
 # Regex for names with a version suffix in the first segment (python3.13-, php8-, ruby3.2-)
 _VERSIONED_PREFIX_RE = re.compile(r"^[A-Za-z]+\d+(\.\d+)+(-|$)")
+
+
+def default_model_path() -> Path:
+    """$XDG_DATA_HOME/vibebuild/model.npz, ~/.local/share/vibebuild/model.npz by default."""
+    data_home = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(data_home) / "vibebuild" / "model.npz"
 
 
 def _canonical_score(rpm_name: str) -> tuple:
@@ -45,6 +54,11 @@ def _canonical_score(rpm_name: str) -> tuple:
     """
     versioned = 1 if _VERSIONED_PREFIX_RE.match(rpm_name) else 0
     return (versioned, len(rpm_name), rpm_name)
+
+
+def _require_sklearn() -> None:
+    if not HAS_SKLEARN:
+        raise VibeBuildError("scikit-learn is required: pip install 'vibebuild[ml]'")
 
 
 class MLPackageResolver:
@@ -62,66 +76,53 @@ class MLPackageResolver:
             # {"rpm_name": "python3-requests", "srpm_name": "python-requests"}
     """
 
-    # Class-level defaults: needed for tests that use __new__(cls)
-    # without calling __init__, and for backward compatibility.
-    _model_path: Path = _DEFAULT_MODEL_PATH
-    _load_attempted: bool = False
-
     def __init__(self, model_path: str | None = None):
         """
-        Initialize the ML package resolver.
-
         Args:
-            model_path: Path to saved model file. If None, looks for the default
-                        model at vibebuild/data/model.joblib.
+            model_path: Path to a saved model; default_model_path() if None.
 
-        The model itself is NOT loaded in __init__. It is loaded lazily on the first
-        call of `predict()` or `is_available()`, which gives a fast CLI start
-        for commands where ML may not be needed at all (`--analyze-only` on a
-        package where the rules cover all BR).
+        The model is loaded lazily on the first `predict()` or `is_available()`,
+        so commands that never need ML do not pay for loading it.
         """
         self.confidence_threshold = 0.3
         self._vectorizer: Any = None
         self._nn_model: Any = None
+        self._matrix: Any = None
         self._rpm_names: list[str] = []
         self._srpm_names: list[str] = []
         self._provides: list[str] = []
         self._model_loaded = False
-        self._cache: dict[str, dict] = {}
-        self._cache_dirty = False
-
-        # Remember the path, but do NOT load the model now.
-        self._model_path = Path(model_path) if model_path else _DEFAULT_MODEL_PATH
+        self._cache: dict[str, dict | None] = {}
+        self._model_path = Path(model_path) if model_path else default_model_path()
         self._load_attempted = False
-
-        # The light prediction cache is loaded right away because it is small (~KB).
-        self._load_cache()
 
     def _ensure_loaded(self) -> bool:
         """Lazy model loading. Returns True if the model is available."""
         if self._model_loaded or self._load_attempted:
             return self._model_loaded
         self._load_attempted = True
-        if not HAS_SKLEARN:
-            return False
-        if not self._model_path.exists():
+        if not HAS_SKLEARN or not self._model_path.exists():
             return False
         try:
             self.load(str(self._model_path))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("Failed to load model from %s: %s", self._model_path, e)
             return False
         return self._model_loaded
 
     def is_available(self) -> bool:
-        """
-        Check if the resolver is ready to make predictions.
-
-        Returns:
-            True if scikit-learn is installed and a model has been loaded
-            (triggers lazy load on the first call).
-        """
+        """True if scikit-learn is installed and a model is loaded (loads it on first call)."""
         return HAS_SKLEARN and self._ensure_loaded()
+
+    def _fit_neighbors(self) -> None:
+        from sklearn.neighbors import NearestNeighbors
+
+        self._nn_model = NearestNeighbors(
+            n_neighbors=min(_N_NEIGHBORS, len(self._provides)),
+            metric="cosine",
+            algorithm="brute",
+        )
+        self._nn_model.fit(self._matrix)
 
     def train(self, data: list[dict]) -> None:
         """
@@ -134,16 +135,13 @@ class MLPackageResolver:
                              "srpm_name": "python-requests"}, ...]
 
         Raises:
-            RuntimeError: If scikit-learn is not installed.
-            ValueError: If data is empty or malformed.
+            VibeBuildError: If scikit-learn is not installed or data is empty.
         """
-        if not HAS_SKLEARN:
-            raise RuntimeError(
-                "scikit-learn is required for training. Install with: pip install scikit-learn"
-            )
+        _require_sklearn()
+        from sklearn.feature_extraction.text import TfidfVectorizer
 
         if not data:
-            raise ValueError("Training data cannot be empty")
+            raise VibeBuildError("Training data cannot be empty")
 
         self._provides = [entry["provide"] for entry in data]
         self._rpm_names = [entry["rpm_name"] for entry in data]
@@ -151,33 +149,25 @@ class MLPackageResolver:
 
         logger.info("Training TF-IDF vectorizer on %d samples...", len(data))
         self._vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(2, 5),
-            max_features=20000,
+            analyzer="char_wb", ngram_range=_NGRAM_RANGE, max_features=_MAX_FEATURES
         )
-        tfidf_matrix = self._vectorizer.fit_transform(self._provides)
-
-        logger.info("Fitting NearestNeighbors model...")
-        self._nn_model = NearestNeighbors(
-            n_neighbors=min(10, len(data)),
-            metric="cosine",
-            algorithm="brute",
-        )
-        self._nn_model.fit(tfidf_matrix)
-
+        self._matrix = self._vectorizer.fit_transform(self._provides)
+        self._fit_neighbors()
+        self._cache.clear()
         self._model_loaded = True
-        vocab_size = len(self._vectorizer.vocabulary_)
-        logger.info("Model trained: %d samples, vocabulary size %d", len(data), vocab_size)
+        logger.info(
+            "Model trained: %d samples, vocabulary size %d",
+            len(data),
+            len(self._vectorizer.vocabulary_),
+        )
 
     def predict(self, dep_name: str) -> dict | None:
         """
         Predict the RPM package name for a dependency string.
 
-        Top-K majority voting:
-          1. Take the k=10 nearest neighbors.
-          2. Vote for the SRPM, neighbor weight = (1 - distance).
-          3. Inside the winning SRPM pick the canonical RPM:
-             prefer `python3-X` over `python3.13-X`, all else equal the shorter one.
+        The nearest known provide decides the SRPM if its cosine distance is within
+        confidence_threshold. Among the k=10 nearest neighbors from that SRPM the
+        most canonical RPM name wins: `python3-X` over `python3.13-X`, then the shorter.
 
         Returns:
             Dict with "rpm_name" and "srpm_name" keys, or None if all neighbors are
@@ -185,16 +175,15 @@ class MLPackageResolver:
         """
         if not self.is_available():
             return None
-
-        cache_key = self._cache_key(dep_name)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        if dep_name in self._cache:
+            return self._cache[dep_name]
 
         query_vec = self._vectorizer.transform([dep_name])
         distances, indices = self._nn_model.kneighbors(query_vec)
 
         # top-1 is strict: its SRPM is our SRPM answer if it passed the threshold
         best_distance = float(distances[0][0])
+        result: dict | None = None
         if best_distance > self.confidence_threshold:
             logger.debug(
                 "Prediction for '%s' below confidence threshold (best=%.3f > %.3f)",
@@ -202,113 +191,100 @@ class MLPackageResolver:
                 best_distance,
                 self.confidence_threshold,
             )
-            return None
-        best_srpm = self._srpm_names[int(indices[0][0])]
+        else:
+            best_srpm = self._srpm_names[int(indices[0][0])]
+            # Among the top-K neighbors of the same SRPM pick the canonical RPM
+            # (prefer python3- over python3.13-; shorter is better).
+            in_srpm = [
+                (self._rpm_names[int(i)], float(d))
+                for i, d in zip(indices[0], distances[0], strict=True)
+                if self._srpm_names[int(i)] == best_srpm and float(d) <= self.confidence_threshold
+            ]
+            in_srpm.sort(key=lambda t: (_canonical_score(t[0]), t[1]))
+            result = {"rpm_name": in_srpm[0][0], "srpm_name": best_srpm}
 
-        # Among the top-K neighbors of the same SRPM pick the canonical RPM
-        # (prefer python3- over python3.13-; shorter is better).
-        in_srpm = [
-            (self._rpm_names[int(i)], float(d))
-            for i, d in zip(indices[0], distances[0], strict=True)
-            if self._srpm_names[int(i)] == best_srpm and float(d) <= self.confidence_threshold
-        ]
-        in_srpm.sort(key=lambda t: (_canonical_score(t[0]), t[1]))
-        best_rpm = in_srpm[0][0]
-
-        result = {"rpm_name": best_rpm, "srpm_name": best_srpm}
-
-        self._cache[cache_key] = result
-        self._cache_dirty = True
-        self._save_cache()
-
+        self._cache[dep_name] = result
         return result
 
     def save(self, path: str) -> None:
         """
-        Save the trained model to disk.
-
-        Args:
-            path: File path to save the model (joblib format).
+        Save the trained model as a compressed .npz archive.
 
         Raises:
-            RuntimeError: If scikit-learn is not installed or model is not trained.
+            VibeBuildError: If scikit-learn is not installed or no model is trained.
         """
-        if not HAS_SKLEARN:
-            raise RuntimeError("scikit-learn is required. Install with: pip install scikit-learn")
+        _require_sklearn()
+        import numpy as np
 
         if not self._model_loaded:
-            raise RuntimeError("No model to save. Train or load a model first.")
+            raise VibeBuildError("No model to save. Train or load a model first.")
 
-        model_data = {
-            "vectorizer": self._vectorizer,
-            "nn_model": self._nn_model,
-            "rpm_names": self._rpm_names,
-            "srpm_names": self._srpm_names,
-            "provides": self._provides,
-            "confidence_threshold": self.confidence_threshold,
-        }
-
+        vocabulary = self._vectorizer.vocabulary_
+        terms = sorted(vocabulary, key=vocabulary.__getitem__)
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model_data, str(output_path), compress=9)
+        with open(output_path, "wb") as f:
+            np.savez_compressed(
+                f,
+                format=np.array(MODEL_FORMAT),
+                ngram_range=np.array(_NGRAM_RANGE),
+                confidence_threshold=np.array(self.confidence_threshold),
+                provides=np.array(self._provides, dtype=str),
+                rpm_names=np.array(self._rpm_names, dtype=str),
+                srpm_names=np.array(self._srpm_names, dtype=str),
+                terms=np.array(terms, dtype=str),
+                idf=self._vectorizer.idf_,
+            )
         logger.info("Model saved to %s", path)
 
     def load(self, path: str) -> None:
         """
-        Load a trained model from disk.
-
-        Args:
-            path: File path to load the model from (joblib format).
+        Load a model saved by `save`.
 
         Raises:
-            RuntimeError: If scikit-learn is not installed.
-            FileNotFoundError: If model file does not exist.
+            VibeBuildError: If scikit-learn is missing or the file is not a usable model.
         """
-        if not HAS_SKLEARN:
-            raise RuntimeError("scikit-learn is required. Install with: pip install scikit-learn")
+        _require_sklearn()
+        import numpy as np
+        from sklearn.feature_extraction.text import TfidfVectorizer
 
         model_path = Path(path)
         if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {path}")
+            raise VibeBuildError(f"Model file not found: {path}")
 
-        model_data = joblib.load(str(model_path))
+        try:
+            with np.load(model_path, allow_pickle=False) as model:
+                if int(model["format"]) != MODEL_FORMAT:
+                    raise VibeBuildError(f"Unsupported model format {int(model['format'])}")
+                ngram_range = tuple(int(n) for n in model["ngram_range"])
+                threshold = float(model["confidence_threshold"])
+                provides = model["provides"].tolist()
+                rpm_names = model["rpm_names"].tolist()
+                srpm_names = model["srpm_names"].tolist()
+                terms = model["terms"].tolist()
+                idf = model["idf"]
+        except (OSError, KeyError, ValueError) as exc:
+            raise VibeBuildError(f"Cannot read model {path}: {exc}") from exc
 
-        self._vectorizer = model_data["vectorizer"]
-        self._nn_model = model_data["nn_model"]
-        self._rpm_names = model_data["rpm_names"]
-        self._srpm_names = model_data["srpm_names"]
-        self._provides = model_data["provides"]
-        self.confidence_threshold = model_data.get(
-            "confidence_threshold", self.confidence_threshold
+        if not provides or not (len(provides) == len(rpm_names) == len(srpm_names)):
+            raise VibeBuildError(f"Inconsistent model {path}: row counts differ")
+        if len(terms) != len(idf):
+            raise VibeBuildError(f"Inconsistent model {path}: vocabulary size differs")
+
+        vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=ngram_range,
+            vocabulary={term: i for i, term in enumerate(terms)},
         )
+        vectorizer.idf_ = idf
+
+        self._vectorizer = vectorizer
+        self._matrix = vectorizer.transform(provides)
+        self._provides = provides
+        self._rpm_names = rpm_names
+        self._srpm_names = srpm_names
+        self.confidence_threshold = threshold
+        self._fit_neighbors()
+        self._cache.clear()
         self._model_loaded = True
         logger.info("Model loaded from %s (%d entries)", path, len(self._provides))
-
-    def _cache_key(self, dep_name: str) -> str:
-        """Generate a stable cache key for a dependency name."""
-        return hashlib.sha256(dep_name.encode("utf-8")).hexdigest()[:16]
-
-    def _load_cache(self) -> None:
-        """Load prediction cache from disk."""
-        try:
-            if _CACHE_FILE.exists():
-                with open(_CACHE_FILE, encoding="utf-8") as f:
-                    self._cache = json.load(f)
-                logger.debug("Loaded %d cached predictions", len(self._cache))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load prediction cache: %s", e)
-            self._cache = {}
-
-    def _save_cache(self) -> None:
-        """Save prediction cache to disk."""
-        if not self._cache_dirty:
-            return
-
-        try:
-            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._cache, f, indent=2)
-            self._cache_dirty = False
-            logger.debug("Saved %d cached predictions", len(self._cache))
-        except OSError as e:
-            logger.warning("Failed to save prediction cache: %s", e)

@@ -8,19 +8,18 @@ perl(File::Path)) to real RPM package names, and maps RPM names to possible SRPM
 import logging
 import re
 from collections.abc import Callable
+from pathlib import Path
+
+from vibebuild.ml_resolver import MLPackageResolver
 
 logger = logging.getLogger(__name__)
 
-# Known RPM system macros for expanding %{...} in dependency names
+# RPM macros for expanding %{...} in dependency names. Only macros that do not
+# change between Fedora releases: versions (python3_version, ruby_version, ...)
+# are left unexpanded rather than guessed.
 SYSTEM_MACROS: dict[str, str] = {
     "python3_pkgversion": "3",
-    "python3_version": "3.12",
-    "python3_version_nodots": "312",
     "__python3": "/usr/bin/python3",
-    "python3_sitelib": "/usr/lib/python3.12/site-packages",
-    "python3_sitearch": "/usr/lib64/python3.12/site-packages",
-    "lua_version": "5.4",
-    "ruby_version": "3.2",
     "_prefix": "/usr",
     "_bindir": "/usr/bin",
     "_libdir": "/usr/lib64",
@@ -326,10 +325,6 @@ SUBPACKAGE_TO_SRPM: dict[str, str] = {
     "mesa-libgbm-devel": "mesa",
     "mesa-vulkan-drivers": "mesa",
     "mesa-dri-drivers": "mesa",
-    # ---- nodejs -> versioned ----
-    "nodejs": "nodejs22",
-    "nodejs-devel": "nodejs22",
-    "npm": "nodejs22",
     # ---- libpng subpackages ----
     "libpng": "libpng",
     "libpng-devel": "libpng",
@@ -707,15 +702,9 @@ class PackageNameResolver:
 def create_name_resolver(
     no_ml: bool = False, ml_model_path: str | None = None
 ) -> PackageNameResolver:
-    """A PackageNameResolver with the ML fallback when scikit-learn and a model are there."""
-    ml_resolver = None
-    if not no_ml:
-        try:
-            from vibebuild.ml_resolver import MLPackageResolver
-
-            ml_resolver = MLPackageResolver(model_path=ml_model_path)
-            if not ml_resolver.is_available():
-                ml_resolver = None
-        except ImportError:
-            ml_resolver = None
-    return PackageNameResolver(ml_resolver=ml_resolver)
+    """A PackageNameResolver with the ML fallback (its model loads on first use) unless no_ml."""
+    if no_ml:
+        return PackageNameResolver()
+    if ml_model_path and not Path(ml_model_path).exists():
+        logger.warning("ML model not found: %s", ml_model_path)
+    return PackageNameResolver(ml_resolver=MLPackageResolver(model_path=ml_model_path))

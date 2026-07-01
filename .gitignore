@@ -51,10 +51,8 @@ Thumbs.db
 /logs/
 *.src.rpm
 *.rpm
-vibebuild/data/*.joblib
 
 # Script outputs
-training_data.json
 prod_validation_report.json
 perf_bench.json
 

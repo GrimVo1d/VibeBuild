@@ -1,12 +1,12 @@
 """Tests for vibebuild.ml_resolver module."""
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock
+import pickle
 
 import pytest
 
-from vibebuild.ml_resolver import MLPackageResolver
+from vibebuild import ml_resolver
+from vibebuild.exceptions import VibeBuildError
+from vibebuild.ml_resolver import MLPackageResolver, default_model_path
 
 # Sample training data that mimics real Fedora provides
 SAMPLE_TRAINING_DATA = [
@@ -49,456 +49,179 @@ SAMPLE_TRAINING_DATA = [
 ]
 
 
-def _make_mock_vectorizer():
-    """Create a mock TfidfVectorizer."""
-    mock = MagicMock()
-    mock.vocabulary_ = {"a": 0, "b": 1, "c": 2}
-    mock.fit_transform.return_value = MagicMock()
-    mock.transform.return_value = MagicMock()
-    return mock
-
-
-def _make_mock_nn():
-    """Create a mock NearestNeighbors."""
-    mock = MagicMock()
-    mock.kneighbors.return_value = ([[0.05]], [[0]])
-    return mock
+needs_sklearn = pytest.mark.skipif(not ml_resolver.HAS_SKLEARN, reason="scikit-learn missing")
 
 
 @pytest.fixture(autouse=True)
-def mock_sklearn(mocker):
-    """Mock sklearn so all tests run without scikit-learn installed."""
-    mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", True)
-
-    mock_tfidf_cls = MagicMock()
-    mock_tfidf_cls.return_value = _make_mock_vectorizer()
-    mocker.patch("vibebuild.ml_resolver.TfidfVectorizer", mock_tfidf_cls, create=True)
-
-    mock_nn_cls = MagicMock()
-    mock_nn_cls.return_value = _make_mock_nn()
-    mocker.patch("vibebuild.ml_resolver.NearestNeighbors", mock_nn_cls, create=True)
-
-    mock_joblib = MagicMock()
-
-    def joblib_dump(data, path, **kwargs):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text("mock model")
-
-    mock_joblib.dump.side_effect = joblib_dump
-    mock_joblib.load.return_value = {
-        "vectorizer": _make_mock_vectorizer(),
-        "nn_model": _make_mock_nn(),
-        "rpm_names": [d["rpm_name"] for d in SAMPLE_TRAINING_DATA],
-        "srpm_names": [d["srpm_name"] for d in SAMPLE_TRAINING_DATA],
-        "provides": [d["provide"] for d in SAMPLE_TRAINING_DATA],
-        "confidence_threshold": 0.3,
-    }
-    mocker.patch("vibebuild.ml_resolver.joblib", mock_joblib, create=True)
-
-    return mock_joblib
+def data_home(tmp_path, monkeypatch):
+    """The default model location points into tmp_path, never at the real one."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+    return tmp_path / "share"
 
 
 @pytest.fixture
-def training_data():
-    """Sample training data for testing."""
-    return SAMPLE_TRAINING_DATA.copy()
-
-
-@pytest.fixture
-def trained_resolver(training_data):
-    """MLPackageResolver with a trained model (no model file on disk)."""
-    resolver = MLPackageResolver.__new__(MLPackageResolver)
-    resolver.confidence_threshold = 0.3
-    resolver._vectorizer = None
-    resolver._nn_model = None
-    resolver._rpm_names = []
-    resolver._srpm_names = []
-    resolver._provides = []
-    resolver._model_loaded = False
-    resolver._cache = {}
-    resolver._cache_dirty = False
-    resolver.train(training_data)
+def trained():
+    resolver = MLPackageResolver()
+    resolver.train(SAMPLE_TRAINING_DATA)
     return resolver
 
 
 @pytest.fixture
-def empty_resolver():
-    """MLPackageResolver without a loaded model."""
-    resolver = MLPackageResolver.__new__(MLPackageResolver)
-    resolver.confidence_threshold = 0.3
-    resolver._vectorizer = None
-    resolver._nn_model = None
-    resolver._rpm_names = []
-    resolver._srpm_names = []
-    resolver._provides = []
-    resolver._model_loaded = False
-    resolver._cache = {}
-    resolver._cache_dirty = False
-    # tried to load, found nothing blocks lazy-load in _ensure_loaded
-    resolver._load_attempted = True
-    return resolver
+def model_file(trained, tmp_path):
+    path = tmp_path / "model.npz"
+    trained.save(str(path))
+    return path
 
 
-class TestMLPackageResolverInstantiation:
-    def test_can_instantiate_without_model(self):
-        """MLPackageResolver should instantiate even if no model file exists."""
-        resolver = MLPackageResolver(model_path="/nonexistent/path/model.joblib")
+class TestDefaultModelPath:
+    def test_xdg_data_home(self, data_home):
+        assert default_model_path() == data_home / "vibebuild" / "model.npz"
 
-        assert resolver is not None
-        assert resolver.confidence_threshold == 0.3
-        assert resolver._model_loaded is False
+    def test_local_share(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("XDG_DATA_HOME")
+        monkeypatch.setattr("vibebuild.ml_resolver.Path.home", lambda: tmp_path)
 
-    def test_can_instantiate_with_default_path(self):
-        """MLPackageResolver should instantiate with default model path."""
+        assert default_model_path() == tmp_path / ".local/share/vibebuild/model.npz"
+
+
+class TestWithoutModel:
+    def test_not_available_without_model_file(self, tmp_path):
+        resolver = MLPackageResolver(model_path=str(tmp_path / "missing.npz"))
+
+        assert resolver.is_available() is False
+        assert resolver.predict("python3dist(requests)") is None
+
+    def test_default_path_is_lazy(self, data_home):
         resolver = MLPackageResolver()
 
-        assert resolver is not None
-        assert resolver.confidence_threshold == 0.3
+        assert resolver._model_path == data_home / "vibebuild" / "model.npz"
+        assert resolver._load_attempted is False
 
-
-class TestMLPackageResolverTrain:
-    def test_train_on_sample_data(self, training_data):
-        """Model should train successfully on sample data."""
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver.confidence_threshold = 0.3
-        resolver._vectorizer = None
-        resolver._nn_model = None
-        resolver._rpm_names = []
-        resolver._srpm_names = []
-        resolver._provides = []
-        resolver._model_loaded = False
-        resolver._cache = {}
-        resolver._cache_dirty = False
-
-        resolver.train(training_data)
-
-        assert resolver._model_loaded is True
-        assert len(resolver._provides) == len(training_data)
-        assert len(resolver._rpm_names) == len(training_data)
-        assert len(resolver._srpm_names) == len(training_data)
-        assert resolver._vectorizer is not None
-        assert resolver._nn_model is not None
-
-    def test_train_empty_data_raises(self, empty_resolver):
-        """Training with empty data should raise ValueError."""
-        with pytest.raises(ValueError, match="empty"):
-            empty_resolver.train([])
-
-    def test_train_sets_vocabulary(self, trained_resolver):
-        """After training, vectorizer should have a vocabulary."""
-        vocab = trained_resolver._vectorizer.vocabulary_
-        assert len(vocab) > 0
-
-
-class TestMLPackageResolverPredict:
-    def test_predict_exact_match(self, trained_resolver):
-        """Predicting an exact training provide should return correct result."""
-        result = trained_resolver.predict("python3dist(requests)")
-
-        assert result is not None
-        assert result["rpm_name"] == "python3-requests"
-        assert result["srpm_name"] == "python-requests"
-
-    def test_predict_pkgconfig_match(self, trained_resolver):
-        """Predicting a pkgconfig provide should return correct result."""
-        # Mock returns index 7 for pkgconfig(glib-2.0)
-        trained_resolver._nn_model.kneighbors.return_value = ([[0.05]], [[7]])
-        result = trained_resolver.predict("pkgconfig(glib-2.0)")
-
-        assert result is not None
-        assert result["rpm_name"] == "glib2-devel"
-        assert result["srpm_name"] == "glib2"
-
-    def test_predict_perl_match(self, trained_resolver):
-        """Predicting a perl provide should return correct result."""
-        # Mock returns index 14 for perl(JSON::PP)
-        trained_resolver._nn_model.kneighbors.return_value = ([[0.05]], [[14]])
-        result = trained_resolver.predict("perl(JSON::PP)")
-
-        assert result is not None
-        assert result["rpm_name"] == "perl-JSON-PP"
-
-    def test_predict_returns_none_for_garbage(self, trained_resolver):
-        """Predicting totally unrelated input should return None (low confidence)."""
-        # Override kneighbors to return high distance
-        trained_resolver._nn_model.kneighbors.return_value = ([[0.9]], [[0]])
-        result = trained_resolver.predict("xxxxxxxxx_yyyyyyyy_zzzzzzz_12345")
-
-        assert result is None
-
-    def test_predict_returns_none_when_not_available(self, empty_resolver):
-        """Predicting without a loaded model should return None."""
-        result = empty_resolver.predict("python3dist(requests)")
-
-        assert result is None
-
-    def test_predict_result_structure(self, trained_resolver):
-        """Prediction result should have rpm_name and srpm_name keys."""
-        result = trained_resolver.predict("python3dist(flask)")
-
-        assert result is not None
-        assert "rpm_name" in result
-        assert "srpm_name" in result
-        assert isinstance(result["rpm_name"], str)
-        assert isinstance(result["srpm_name"], str)
-
-
-class TestMLPackageResolverSaveLoad:
-    def test_save_and_load_roundtrip(self, trained_resolver, tmp_path):
-        """Model should produce same predictions after save/load cycle."""
-        model_file = tmp_path / "test_model.joblib"
-
-        # Save
-        trained_resolver.save(str(model_file))
-        assert model_file.exists()
-
-        # Load into new resolver
-        loaded = MLPackageResolver.__new__(MLPackageResolver)
-        loaded.confidence_threshold = 0.3
-        loaded._vectorizer = None
-        loaded._nn_model = None
-        loaded._rpm_names = []
-        loaded._srpm_names = []
-        loaded._provides = []
-        loaded._model_loaded = False
-        loaded._cache = {}
-        loaded._cache_dirty = False
-        loaded.load(str(model_file))
-
-        assert loaded._model_loaded is True
-
-    def test_save_creates_parent_dirs(self, trained_resolver, tmp_path):
-        """Save should create parent directories if they don't exist."""
-        model_file = tmp_path / "nested" / "dir" / "model.joblib"
-
-        trained_resolver.save(str(model_file))
-
-        assert model_file.exists()
-
-    def test_save_raises_without_trained_model(self, empty_resolver, tmp_path):
-        """Save should raise if no model is trained."""
-        model_file = tmp_path / "model.joblib"
-
-        with pytest.raises(RuntimeError, match="No model to save"):
-            empty_resolver.save(str(model_file))
-
-    def test_load_nonexistent_file_raises(self, empty_resolver):
-        """Load should raise FileNotFoundError for missing file."""
-        with pytest.raises(FileNotFoundError, match="Model file not found"):
-            empty_resolver.load("/nonexistent/model.joblib")
-
-    def test_load_via_constructor(self, trained_resolver, tmp_path):
-        """Constructor should auto-load model if path exists."""
-        model_file = tmp_path / "model.joblib"
-        trained_resolver.save(str(model_file))
-
-        resolver = MLPackageResolver(model_path=str(model_file))
-
-        assert resolver.is_available() is True
-
-
-class TestMLPackageResolverIsAvailable:
-    def test_is_available_after_training(self, trained_resolver):
-        """is_available should return True after training."""
-        assert trained_resolver.is_available() is True
-
-    def test_is_available_without_model(self, empty_resolver):
-        """is_available should return False when no model is loaded."""
-        assert empty_resolver.is_available() is False
-
-    def test_is_available_after_load(self, trained_resolver, tmp_path):
-        """is_available should return True after loading a saved model."""
-        model_file = tmp_path / "model.joblib"
-        trained_resolver.save(str(model_file))
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver.confidence_threshold = 0.3
-        resolver._vectorizer = None
-        resolver._nn_model = None
-        resolver._rpm_names = []
-        resolver._srpm_names = []
-        resolver._provides = []
-        resolver._model_loaded = False
-        resolver._cache = {}
-        resolver._cache_dirty = False
-        # tried, found nothing so that the first is_available returns False without lazy-load
-        resolver._load_attempted = True
+    def test_without_sklearn(self, mocker, tmp_path):
+        mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", False)
+        resolver = MLPackageResolver()
 
         assert resolver.is_available() is False
-
-        resolver.load(str(model_file))
-
-        assert resolver.is_available() is True
-
-
-class TestMLPackageResolverCache:
-    def test_prediction_is_cached(self, trained_resolver):
-        """After a prediction, the result should be in the cache."""
-        trained_resolver._cache = {}
-
-        result = trained_resolver.predict("python3dist(requests)")
-
-        assert result is not None
-        assert len(trained_resolver._cache) == 1
-        # Second call should use cache
-        cache_key = trained_resolver._cache_key("python3dist(requests)")
-        assert cache_key in trained_resolver._cache
-        assert trained_resolver._cache[cache_key] == result
-
-    def test_cached_prediction_returns_same_result(self, trained_resolver):
-        """Subsequent predictions for the same input should return cached results."""
-        trained_resolver._cache = {}
-
-        result1 = trained_resolver.predict("pkgconfig(glib-2.0)")
-        result2 = trained_resolver.predict("pkgconfig(glib-2.0)")
-
-        assert result1 == result2
-
-    def test_cache_persists_to_disk(self, trained_resolver, tmp_path, mocker):
-        """Cache should be written to disk after prediction."""
-        cache_file = tmp_path / "test_cache.json"
-        mocker.patch("vibebuild.ml_resolver._CACHE_FILE", cache_file)
-        mocker.patch("vibebuild.ml_resolver._CACHE_DIR", tmp_path)
-        trained_resolver._cache = {}
-        trained_resolver._cache_dirty = False
-
-        trained_resolver.predict("python3dist(requests)")
-
-        assert cache_file.exists()
-        with open(cache_file) as f:
-            disk_cache = json.load(f)
-        assert len(disk_cache) == 1
-
-    def test_cache_loads_from_disk(self, trained_resolver, tmp_path, mocker):
-        """Cache should be loaded from disk on initialization."""
-        cache_file = tmp_path / "test_cache.json"
-        cache_data = {"abc123": {"rpm_name": "cached-pkg", "srpm_name": "cached-src"}}
-        with open(cache_file, "w") as f:
-            json.dump(cache_data, f)
-
-        mocker.patch("vibebuild.ml_resolver._CACHE_FILE", cache_file)
-        trained_resolver._load_cache()
-
-        assert "abc123" in trained_resolver._cache
-        assert trained_resolver._cache["abc123"]["rpm_name"] == "cached-pkg"
-
-    def test_cache_handles_corrupt_file(self, tmp_path, mocker):
-        """Cache loading should handle corrupt JSON gracefully."""
-        cache_file = tmp_path / "bad_cache.json"
-        cache_file.write_text("not valid json {{{")
-
-        mocker.patch("vibebuild.ml_resolver._CACHE_FILE", cache_file)
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._cache = {}
-        resolver._cache_dirty = False
-        resolver._load_cache()
-
-        assert resolver._cache == {}
-
-
-class TestMLPackageResolverWithoutSklearn:
-    def test_train_raises_without_sklearn(self, mocker):
-        """Training should raise RuntimeError if sklearn is not available."""
-        mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", False)
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver.confidence_threshold = 0.3
-        resolver._vectorizer = None
-        resolver._nn_model = None
-        resolver._rpm_names = []
-        resolver._srpm_names = []
-        resolver._provides = []
-        resolver._model_loaded = False
-        resolver._cache = {}
-        resolver._cache_dirty = False
-
-        with pytest.raises(RuntimeError, match="scikit-learn is required"):
+        with pytest.raises(VibeBuildError, match="scikit-learn"):
             resolver.train(SAMPLE_TRAINING_DATA)
-
-    def test_is_available_false_without_sklearn(self, mocker):
-        """is_available should return False when sklearn is not available."""
-        mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", False)
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._model_loaded = True  # Even with model "loaded"
-        resolver._cache = {}
-        resolver._cache_dirty = False
-
-        assert resolver.is_available() is False
-
-    def test_save_raises_without_sklearn(self, mocker, tmp_path):
-        """Save should raise RuntimeError if sklearn is not available."""
-        mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", False)
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._model_loaded = True
-        resolver._cache = {}
-        resolver._cache_dirty = False
-
-        with pytest.raises(RuntimeError, match="scikit-learn is required"):
-            resolver.save(str(tmp_path / "model.joblib"))
-
-    def test_load_raises_without_sklearn(self, mocker, tmp_path):
-        """Load should raise RuntimeError if sklearn is not available."""
-        mocker.patch("vibebuild.ml_resolver.HAS_SKLEARN", False)
-        model_file = tmp_path / "model.joblib"
-        model_file.write_text("fake")
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._cache = {}
-        resolver._cache_dirty = False
-
-        with pytest.raises(RuntimeError, match="scikit-learn is required"):
-            resolver.load(str(model_file))
+        with pytest.raises(VibeBuildError, match="scikit-learn"):
+            resolver.save(str(tmp_path / "m.npz"))
+        with pytest.raises(VibeBuildError, match="scikit-learn"):
+            resolver.load(str(tmp_path / "m.npz"))
 
 
-class TestMLPackageResolverSaveCacheDirtyFalse:
-    def test_save_cache_skips_when_not_dirty(self):
-        """_save_cache should do nothing when cache is not dirty."""
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._cache = {"key": "value"}
-        resolver._cache_dirty = False
+@needs_sklearn
+class TestTrainAndPredict:
+    def test_empty_data(self):
+        with pytest.raises(VibeBuildError, match="empty"):
+            MLPackageResolver().train([])
 
-        resolver._save_cache()
-        # No exception, nothing written
+    def test_exact_match(self, trained):
+        assert trained.predict("python3dist(requests)") == {
+            "rpm_name": "python3-requests",
+            "srpm_name": "python-requests",
+        }
 
-    def test_save_cache_handles_os_error(self, mocker, tmp_path):
-        """_save_cache should handle OSError gracefully."""
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._cache = {"key": "value"}
-        resolver._cache_dirty = True
-        mocker.patch("vibebuild.ml_resolver._CACHE_DIR", tmp_path / "no_perms")
-        mocker.patch("vibebuild.ml_resolver._CACHE_FILE", tmp_path / "no_perms" / "cache.json")
-        mocker.patch("pathlib.Path.mkdir", side_effect=OSError("Permission denied"))
+    @pytest.mark.parametrize(
+        ("provide", "srpm"),
+        [("pkgconfig(glib-2.0)", "glib2"), ("perl(JSON::PP)", "perl-JSON-PP")],
+    )
+    def test_matches(self, trained, provide, srpm):
+        assert trained.predict(provide)["srpm_name"] == srpm
 
-        resolver._save_cache()
-        # Should not raise
+    def test_garbage_is_below_threshold(self, trained):
+        assert trained.predict("zzzzqqqq-xxxx-9999") is None
 
-
-class TestMLPackageResolverLoadCacheNoFile:
-    def test_load_cache_file_not_exists(self, mocker, tmp_path):
-        """_load_cache when file doesn't exist should leave cache empty."""
-        cache_file = tmp_path / "nonexistent_cache.json"
-        mocker.patch("vibebuild.ml_resolver._CACHE_FILE", cache_file)
-
-        resolver = MLPackageResolver.__new__(MLPackageResolver)
-        resolver._cache = {}
-        resolver._cache_dirty = False
-        resolver._load_cache()
-
-        assert resolver._cache == {}
-
-
-class TestMLPackageResolverConstructorWithModel:
-    def test_constructor_handles_load_exception(self, mocker, tmp_path):
-        """Constructor should handle model load failure gracefully."""
-        model_file = tmp_path / "bad_model.joblib"
-        model_file.write_text("corrupt model data")
-        mocker.patch(
-            "vibebuild.ml_resolver.joblib.load", side_effect=Exception("corrupt"), create=True
+    def test_prefers_canonical_rpm_name(self):
+        resolver = MLPackageResolver()
+        resolver.train(
+            [
+                {"provide": "python3dist(foo)", "rpm_name": "python3.13-foo", "srpm_name": "foo"},
+                {"provide": "python3dist(foo)", "rpm_name": "python3-foo", "srpm_name": "foo"},
+                *SAMPLE_TRAINING_DATA,
+            ]
         )
 
-        resolver = MLPackageResolver(model_path=str(model_file))
+        assert resolver.predict("python3dist(foo)")["rpm_name"] == "python3-foo"
 
-        assert resolver._model_loaded is False
+    def test_predictions_are_cached_in_memory(self, trained, mocker):
+        first = trained.predict("python3dist(requests)")
+        spy = mocker.spy(trained._nn_model, "kneighbors")
+
+        assert trained.predict("python3dist(requests)") == first
+        spy.assert_not_called()
+
+
+@needs_sklearn
+class TestSaveLoad:
+    def test_roundtrip(self, trained, model_file):
+        loaded = MLPackageResolver()
+        loaded.load(str(model_file))
+
+        for entry in SAMPLE_TRAINING_DATA:
+            assert loaded.predict(entry["provide"]) == trained.predict(entry["provide"])
+
+    def test_lazy_load_from_default_path(self, trained):
+        trained.save(str(default_model_path()))
+        resolver = MLPackageResolver()
+
+        assert resolver.predict("pkgconfig(zlib)")["srpm_name"] == "zlib"
+
+    def test_save_creates_parent_dirs(self, trained, tmp_path):
+        path = tmp_path / "a" / "b" / "model.npz"
+        trained.save(str(path))
+
+        assert path.exists()
+
+    def test_save_untrained(self, tmp_path):
+        with pytest.raises(VibeBuildError, match="No model"):
+            MLPackageResolver().save(str(tmp_path / "m.npz"))
+
+    def test_load_missing(self, tmp_path):
+        with pytest.raises(VibeBuildError, match="not found"):
+            MLPackageResolver().load(str(tmp_path / "m.npz"))
+
+    def test_load_refuses_pickled_objects(self, tmp_path):
+        import numpy as np
+
+        path = tmp_path / "evil.npz"
+        np.savez(path, format=np.array([{"a": 1}], dtype=object))
+
+        with pytest.raises(VibeBuildError, match="Cannot read model"):
+            MLPackageResolver().load(str(path))
+
+    def test_load_rejects_pickle_file(self, tmp_path):
+        path = tmp_path / "model.npz"
+        path.write_bytes(pickle.dumps({"vectorizer": None}))
+
+        with pytest.raises(VibeBuildError, match="Cannot read model"):
+            MLPackageResolver().load(str(path))
+
+    def test_load_rejects_other_format(self, model_file):
+        import numpy as np
+
+        with np.load(model_file) as model:
+            arrays = dict(model)
+        arrays["format"] = np.array(99)
+        np.savez(model_file, **arrays)
+
+        with pytest.raises(VibeBuildError, match="Unsupported model format"):
+            MLPackageResolver().load(str(model_file))
+
+    def test_load_rejects_inconsistent_model(self, model_file):
+        import numpy as np
+
+        with np.load(model_file) as model:
+            arrays = dict(model)
+        arrays["rpm_names"] = arrays["rpm_names"][:-1]
+        np.savez(model_file, **arrays)
+
+        with pytest.raises(VibeBuildError, match="Inconsistent"):
+            MLPackageResolver().load(str(model_file))
+
+    def test_broken_model_makes_resolver_unavailable(self, tmp_path, caplog):
+        path = tmp_path / "model.npz"
+        path.write_bytes(b"not a model")
+
+        assert MLPackageResolver(model_path=str(path)).is_available() is False
+        assert "Failed to load model" in caplog.text

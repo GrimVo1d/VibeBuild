@@ -21,7 +21,7 @@ cp /etc/pki/koji/koji_ca_cert.crt /etc/pki/ca-trust/source/anchors/koji_ca_cert.
 update-ca-trust extract
 
 # Install vibebuild in editable mode from the mounted /workspace.
-# Use --no-deps for ml (sklearn/joblib are already installed system-wide), the rest goes through pip.
+# scikit-learn comes from the Fedora package, so the [ml] extra is not installed via pip.
 if [ -f /workspace/pyproject.toml ]; then
     cd /workspace
     pip install --quiet --no-build-isolation -e ".[dev]" \

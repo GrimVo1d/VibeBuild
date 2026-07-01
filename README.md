@@ -65,7 +65,7 @@ vibebuild --dry-run my-package.src.rpm
 # Name resolution options
 vibebuild --no-ml fedora-target my-package.src.rpm              # rules only
 vibebuild --no-name-resolution fedora-target my-package.src.rpm # raw names
-vibebuild --ml-model /path/to/model.joblib fedora-target my-package.src.rpm
+vibebuild --ml-model /path/to/model.npz fedora-target my-package.src.rpm
 ```
 
 A step-by-step demo (download, analysis, dry-run, build) is in the "First build: step by step" section of [QUICKSTART.md](docs/QUICKSTART.md#7-first-build-step-by-step).
@@ -185,17 +185,15 @@ ansible-playbook -i inventory/hosts.ini playbook.yml
 
 ## Training the ML model (optional)
 
-VibeBuild includes scripts for training the ML package name resolution model:
+The model is not shipped with the package. Train it on the provides of a Fedora release:
 
 ```bash
-# 1. Collect training data from the Fedora repositories
-python scripts/collect_training_data.py --output data/training_data.json
-
-# 2. Train the model (aliases from vibebuild/data/alias_training.json are mixed in automatically)
-python scripts/train_model.py --input data/training_data.json --output vibebuild/data/model.joblib
+vibebuild train --release 44                          # saves ~/.local/share/vibebuild/model.npz
+vibebuild train --release 44 --save-data data.json    # also keep the collected data
+vibebuild train --data data.json --output model.npz   # retrain without downloading
 ```
 
-The model uses TF-IDF character n-grams with K-Nearest Neighbors to predict real package names from virtual dependency strings. Training automatically mixes in the aliases from `vibebuild/data/alias_training.json` (for example, `python3` → `python3.12`), so that commands like `vibebuild --download-only python3` work when the model is installed. Use `--ml-model` to point to a custom model.
+The training data come from the repository metadata of Fedora Everything, checked by sha256 from the Fedora metalink. The model uses TF-IDF character n-grams with K-Nearest Neighbors to predict real package names from virtual dependency strings. It is stored as plain NumPy arrays (`.npz`, no pickle). Use `--ml-model` to point to another model.
 
 ## Requirements
 
@@ -204,7 +202,7 @@ The model uses TF-IDF character n-grams with K-Nearest Neighbors to predict real
 - **rpm-build**, **rpm2cpio** (for unpacking and building SRPMs; on Fedora: `dnf install rpm-build`)
 - Access to a Koji server (for example, Fedora Koji for downloading; your own for building)
 
-**Optional (ML name resolution):** `scikit-learn >= 1.3`, `joblib >= 1.3` — install: `pip install -e ".[ml]"`.
+**Optional (ML name resolution):** `scikit-learn >= 1.3` — install: `pip install -e ".[ml]"`.
 
 ## Documentation
 

@@ -9,10 +9,9 @@ RUN dnf install -y \
         koji \
         gcc gcc-c++ make \
         git curl jq which findutils less procps-ng \
-        python3-scikit-learn python3-joblib python3-numpy python3-scipy \
+        python3-scikit-learn python3-numpy python3-scipy \
     && dnf clean all
 
-# Pick up the system-installed sklearn/joblib so as not to rebuild them via pip
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 

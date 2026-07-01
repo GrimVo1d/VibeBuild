@@ -2,10 +2,12 @@
 
 from unittest.mock import Mock
 
+from vibebuild.ml_resolver import MLPackageResolver
 from vibebuild.name_resolver import (
     PROVIDE_PATTERNS,
     SYSTEM_MACROS,
     PackageNameResolver,
+    create_name_resolver,
 )
 
 
@@ -354,8 +356,9 @@ class TestSystemMacros:
     def test_python3_pkgversion(self):
         assert SYSTEM_MACROS["python3_pkgversion"] == "3"
 
-    def test_python3_version(self):
-        assert SYSTEM_MACROS["python3_version"] == "3.12"
+    def test_no_release_specific_versions(self):
+        assert "python3_version" not in SYSTEM_MACROS
+        assert "ruby_version" not in SYSTEM_MACROS
 
     def test_prefix(self):
         assert SYSTEM_MACROS["_prefix"] == "/usr"
@@ -560,3 +563,24 @@ class TestMLFallbackDictResult:
         result = resolver.resolve("custom_provider(something)")
 
         assert result == "custom_provider(something)"
+
+
+class TestCreateNameResolver:
+    def test_no_ml(self):
+        assert create_name_resolver(no_ml=True).ml_resolver is None
+
+    def test_ml_model_is_not_loaded_up_front(self, tmp_path, mocker):
+        load = mocker.patch.object(MLPackageResolver, "load")
+        model = tmp_path / "model.npz"
+        model.write_bytes(b"x")
+
+        resolver = create_name_resolver(ml_model_path=str(model))
+
+        assert isinstance(resolver.ml_resolver, MLPackageResolver)
+        assert resolver.ml_resolver._model_path == model
+        load.assert_not_called()
+
+    def test_missing_explicit_model_warns(self, tmp_path, caplog):
+        create_name_resolver(ml_model_path=str(tmp_path / "missing.npz"))
+
+        assert "ML model not found" in caplog.text
