@@ -83,13 +83,5 @@ exclude_lines = [
 ]
 
 [tool.bandit]
-# B404 / B603: subprocess calls are intentional and use the list form,
-#   shell=True is forbidden by design.
-# B607: koji/rpm are fixed system commands, the path to them is resolved via
-#   PATH, absolute paths would make the package non-portable between distributions.
-# B101: assert is used only to catch violations of internal invariants,
-#   not for validating untrusted input.
-# B110 / B112: try/except/pass is best-effort cleanup of paths and cache, exceptions are
-#   logged by the calling code above.
-skips = ["B101", "B110", "B112", "B404", "B603", "B607"]
-exclude_dirs = ["tests", "scripts", "dev"]
+# No global skips: each accepted finding has an inline `# nosec` with its reason above it.
+exclude_dirs = ["tests", "dev"]

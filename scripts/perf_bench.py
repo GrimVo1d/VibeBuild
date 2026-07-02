@@ -100,7 +100,7 @@ def scenario_name_resolver_1000() -> dict:
 
 
 def scenario_analyze_srpm(srpm_path: str) -> dict:
-    """A single SRPM analyze with a cold cache."""
+    """A single SRPM header read."""
     from vibebuild.analyzer import get_package_info_from_srpm
 
     def _analyze():
@@ -113,11 +113,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="vibebuild perf benchmark")
     parser.add_argument("--output", default="perf_bench.json")
     parser.add_argument("--scenarios", default="all", help="all|ml|resolver|analyzer")
-    parser.add_argument(
-        "--srpm",
-        default="/tmp/vb-test/hello.src.rpm",
-        help="SRPM for the analyze scenario (must exist)",
-    )
+    parser.add_argument("--srpm", help="SRPM for the analyze scenario; skipped without it")
     args = parser.parse_args()
 
     selected = set(args.scenarios.split(","))
@@ -153,11 +149,11 @@ def main() -> int:
 
     if "analyzer" in selected:
         print("=== Analyzer ===", file=sys.stderr)
-        if Path(args.srpm).exists():
+        if args.srpm and Path(args.srpm).exists():
             results["analyze_srpm"] = scenario_analyze_srpm(args.srpm)
             print(f"  analyze_srpm: {results['analyze_srpm']}", file=sys.stderr)
         else:
-            print(f"  skipping analyze: {args.srpm} does not exist", file=sys.stderr)
+            print(f"  skipping analyze: no SRPM at {args.srpm}", file=sys.stderr)
 
     Path(args.output).write_text(json.dumps(results, indent=2))
     print(f"\nReport: {args.output}", file=sys.stderr)

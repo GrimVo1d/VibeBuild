@@ -216,6 +216,18 @@ class TestExtractSrpm:
 
         assert (dest / "foo.spec").read_bytes() == b"Name: foo"
 
+    def test_payload_size_limit(self, tmp_path, fake_rpm2archive, mocker):
+        mocker.patch("vibebuild.spec_patcher.MAX_PAYLOAD_BYTES", 10)
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(_tgz({"foo.spec": b"Name: foo", "big.tar.gz": b"x" * 64}))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with pytest.raises(VibeBuildError, match="larger than 10 bytes"):
+            _extract_srpm(srpm, dest, timeout=30)
+
+        assert not (dest / "big.tar.gz").exists()
+
     def test_refuses_parent_dir_paths(self, tmp_path, fake_rpm2archive):
         srpm = tmp_path / "foo.src.rpm"
         srpm.write_bytes(_tgz({"../evil": b"pwned"}))

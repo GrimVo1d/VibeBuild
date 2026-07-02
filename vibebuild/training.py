@@ -15,7 +15,7 @@ import json
 import logging
 import random
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import xml.etree.ElementTree as ET  # nosec B405
 from collections.abc import Iterator
@@ -171,10 +171,12 @@ def _decompressed(path: Path) -> Iterator[IO[bytes]]:
         except ImportError:
             if not shutil.which("zstd"):
                 raise VibeBuildError("zstd metadata needs Python 3.14 or the zstd tool") from None
-            with subprocess.Popen(["zstd", "-d", "-c", str(path)], stdout=subprocess.PIPE) as proc:
-                assert proc.stdout is not None
-                yield proc.stdout
-                proc.stdout.close()
+            # List argv without a shell; zstd was found in PATH above
+            argv = ["zstd", "-d", "-c", str(path)]
+            with subprocess.Popen(argv, stdout=subprocess.PIPE) as proc:  # nosec B603
+                stdout = cast(IO[bytes], proc.stdout)  # stdout=PIPE, never None
+                yield stdout
+                stdout.close()
         else:
             with zstd.open(path, "rb") as stream:
                 yield cast(IO[bytes], stream)

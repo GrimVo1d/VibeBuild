@@ -22,6 +22,7 @@ import requests
 
 from vibebuild._retry import with_retry
 from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
+from vibebuild.koji_client import HUB_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ def srpm_digest(path: Path) -> str:
             signature = 16 * count + size
             f.seek(signature + (-signature) % 8, os.SEEK_CUR)  # padded to 8 bytes
             # Koji records only MD5; it is compared against Koji's value, not trusted alone
-            return hashlib.file_digest(f, "md5").hexdigest()  # nosec B324
+            return hashlib.file_digest(f, "md5").hexdigest()
     except OSError as e:
         raise VibeBuildError(f"Cannot read {path.name}: {e}") from e
 
@@ -95,7 +96,12 @@ class SRPMFetcher:
 
     def _session(self) -> koji.ClientSession:
         """A fresh anonymous session: downloads run in parallel threads."""
-        opts: dict = {"anon_retry": True, "max_retries": 3, "retry_interval": 2}
+        opts: dict = {
+            "anon_retry": True,
+            "max_retries": 3,
+            "retry_interval": 2,
+            "timeout": HUB_TIMEOUT,
+        }
         if self.no_ssl_verify:
             opts["no_ssl_verify"] = True
         return koji.ClientSession(self.koji_server, opts=opts)

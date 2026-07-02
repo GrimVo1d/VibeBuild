@@ -26,9 +26,10 @@ from __future__ import annotations
 import functools
 import logging
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
@@ -36,6 +37,9 @@ from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 logger = logging.getLogger(__name__)
 
 UNPACKAGED_MACRO = "%define _unpackaged_files_terminate_build 0"
+
+# Sources in an SRPM are mostly compressed already: the payload is about the SRPM size
+MAX_PAYLOAD_BYTES = 8 * 1024**3
 
 # Names of RPM sections. After `%check` parsing resumes when any
 # of them appears at the start of a line.
@@ -110,20 +114,38 @@ def patch_spec_text(spec: str, add_unpackaged_macro: bool = False) -> str:
     return body
 
 
+def _size_limited(limit: int) -> Callable[[tarfile.TarInfo, str], tarfile.TarInfo | None]:
+    """tarfile's "data" filter that also stops once members add up to more than limit bytes."""
+    total = 0
+
+    def data_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+        nonlocal total
+        checked = tarfile.data_filter(member, path)
+        total += member.size
+        if total > limit:
+            raise VibeBuildError(f"SRPM payload is larger than {limit} bytes")
+        return checked
+
+    return data_filter
+
+
 def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
     """Unpack an SRPM into dest via rpm2archive and tarfile's "data" filter.
 
     The filter refuses absolute paths, `..`, links pointing outside dest and
-    device files, so a crafted SRPM cannot write outside dest.
+    device files, so a crafted SRPM cannot write outside dest; the payload may
+    unpack to at most MAX_PAYLOAD_BYTES.
     """
     with srpm.open("rb") as src:
-        proc = subprocess.Popen(
+        # List argv without a shell; rpm2archive is looked up in PATH
+        proc = subprocess.Popen(  # nosec B603 B607
             ["rpm2archive", "-"], stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         try:
-            assert proc.stdout is not None
             with tarfile.open(fileobj=proc.stdout, mode="r|gz") as archive:
-                archive.extractall(dest, filter="data")
+                # _size_limited wraps tarfile.data_filter, which bandit does not see through
+                size_limited = _size_limited(MAX_PAYLOAD_BYTES)
+                archive.extractall(dest, filter=size_limited)  # nosec B202
             _, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             proc.kill()
@@ -131,6 +153,9 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
         except (tarfile.TarError, OSError) as exc:
             proc.kill()
             raise VibeBuildError(f"Cannot extract {srpm.name}: {exc}") from exc
+        except VibeBuildError:
+            proc.kill()
+            raise
     if proc.returncode != 0:
         raise VibeBuildError(
             f"rpm2archive failed on {srpm.name} (rc={proc.returncode}): "
@@ -153,7 +178,8 @@ def _bwrap() -> str | None:
         )
         return None
     try:
-        probe = subprocess.run(
+        # List argv without a shell; bwrap is the absolute path from shutil.which
+        probe = subprocess.run(  # nosec B603
             [bwrap, "--unshare-all", "--ro-bind", "/", "/", "true"],
             capture_output=True,
             text=True,
@@ -180,6 +206,8 @@ def _sandboxed(cmd: list[str], work_dir: Path) -> list[str]:
     bwrap = _bwrap()
     if not bwrap:
         return cmd
+    # A fresh tmpfs inside the sandbox, not the host /tmp
+    sandbox_tmp = "/tmp"  # nosec B108
     sandbox = [
         bwrap,
         "--unshare-all",
@@ -195,7 +223,7 @@ def _sandboxed(cmd: list[str], work_dir: Path) -> list[str]:
         "--ro-bind-try", "/etc/group", "/etc/group",
         "--proc", "/proc",
         "--dev", "/dev",
-        "--tmpfs", "/tmp",
+        "--tmpfs", sandbox_tmp,
         "--bind", str(work_dir), str(work_dir),
         "--setenv", "HOME", str(work_dir),
         "--chdir", str(work_dir),
@@ -275,7 +303,8 @@ def _patch_into(srpm: Path, target: Path, timeout: int, add_unpackaged_macro: bo
         str(spec_dst),
     ]
     try:
-        result = subprocess.run(
+        # List argv without a shell; the spec is parsed inside bwrap when available
+        result = subprocess.run(  # nosec B603
             _sandboxed(cmd, target), capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired as exc:

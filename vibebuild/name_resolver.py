@@ -670,8 +670,8 @@ class PackageNameResolver:
                         if predicted and predicted not in seen:
                             seen.add(predicted)
                             candidates.append(predicted)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ML prediction failed for %s: %s", name, exc)
 
         # 2. Rule-based resolve (virtual provides)
         resolved = self.resolve(name)

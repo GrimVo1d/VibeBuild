@@ -2,7 +2,7 @@
 SRPM header reader: name, version, release and BuildRequires.
 """
 
-import subprocess
+import subprocess  # nosec B404
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,10 +58,11 @@ def _check_srpm_path(srpm_path: str) -> Path:
         raise SRPMNotFoundError(f"SRPM not found: {srpm_path}")
     if path.suffix != ".rpm" or ".src." not in path.name:
         raise InvalidSRPMError(f"Not a valid SRPM file: {srpm_path}")
-    return path
+    # Absolute, so a file name starting with "-" never reads as an rpm option
+    return path.resolve()
 
 
-def read_srpm_header(srpm_path: str) -> PackageInfo:
+def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
     """
     Read name, version, release and BuildRequires from the SRPM header.
 
@@ -71,7 +72,8 @@ def read_srpm_header(srpm_path: str) -> PackageInfo:
     """
     path = _check_srpm_path(srpm_path)
     try:
-        result = subprocess.run(
+        # List argv without a shell; rpm is looked up in PATH like any rpm tool
+        result = subprocess.run(  # nosec B603 B607
             ["rpm", "-qp", "--qf", _HEADER_QUERY, str(path)],
             capture_output=True,
             text=True,
@@ -122,41 +124,4 @@ def get_build_requires(srpm_path: str) -> list[BuildRequirement]:
         SRPMNotFoundError: If the SRPM does not exist
         InvalidSRPMError: If the file is not an SRPM or rpm cannot read it
     """
-    return read_srpm_header(srpm_path).build_requires
-
-
-def get_package_info_from_srpm(srpm_path: str, use_cache: bool = True) -> PackageInfo:
-    """
-    Extract package information from an SRPM header.
-
-    Args:
-        srpm_path: Path to .src.rpm file
-        use_cache: use the persistent parse cache (default True)
-
-    Returns:
-        PackageInfo with all extracted data
-    """
-    _check_srpm_path(srpm_path)
-
-    if use_cache:
-        try:
-            from vibebuild import _spec_cache
-
-            cached = _spec_cache.get(srpm_path)
-            if cached is not None:
-                return cached
-        except Exception:
-            # any cache problem must not break the main work
-            pass
-
-    info = read_srpm_header(srpm_path)
-
-    if use_cache:
-        try:
-            from vibebuild import _spec_cache
-
-            _spec_cache.put(srpm_path, info)
-        except Exception:
-            pass
-
-    return info
+    return get_package_info_from_srpm(srpm_path).build_requires

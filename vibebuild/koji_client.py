@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 TASK_STATES = {0: "free", 1: "open", 2: "closed", 3: "canceled", 4: "assigned", 5: "failed"}
 FINAL_TASK_STATES = ("closed", "failed", "canceled")
 
+# Seconds one hub call may take; koji's own default is 12 hours.
+HUB_TIMEOUT = 300
+
 
 def poll_interval(elapsed_s: float, max_interval: int = 30) -> float:
     """
@@ -69,7 +72,12 @@ class KojiClient:
     def session(self) -> koji.ClientSession:
         """Anonymous session, created on first use. koji retries connection errors itself."""
         if self._session is None:
-            opts: dict = {"anon_retry": True, "max_retries": 3, "retry_interval": 2}
+            opts: dict = {
+                "anon_retry": True,
+                "max_retries": 3,
+                "retry_interval": 2,
+                "timeout": HUB_TIMEOUT,
+            }
             if self.no_ssl_verify:
                 opts["no_ssl_verify"] = True
             elif self.serverca:
@@ -198,7 +206,9 @@ class KojiSession:
     def session(self) -> koji.ClientSession:
         """The authenticated ClientSession, logging in on first use."""
         if self._session is None:
-            opts = {"no_ssl_verify": True} if self.no_ssl_verify else {}
+            opts: dict = {"timeout": HUB_TIMEOUT}
+            if self.no_ssl_verify:
+                opts["no_ssl_verify"] = True
             session = koji.ClientSession(self.server, opts=opts)
             session.ssl_login(self.cert, self.serverca, self.serverca)
             self._session = session
@@ -210,8 +220,8 @@ class KojiSession:
             return
         try:
             self._session.logout()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Koji logout failed: %s", exc)
         self._session = None
         self._user = None
 

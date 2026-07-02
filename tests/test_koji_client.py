@@ -7,7 +7,13 @@ import koji
 import pytest
 
 from vibebuild.exceptions import KojiBuildError, KojiConnectionError
-from vibebuild.koji_client import KojiClient, KojiSession, poll_interval, task_state_name
+from vibebuild.koji_client import (
+    HUB_TIMEOUT,
+    KojiClient,
+    KojiSession,
+    poll_interval,
+    task_state_name,
+)
 
 HUB = "https://hub/kojihub"
 
@@ -36,6 +42,7 @@ class TestKojiClient:
 
         assert cls.call_args.args[0] == "https://hub/kojihub"
         assert cls.call_args.kwargs["opts"]["serverca"] == "/ca.crt"
+        assert cls.call_args.kwargs["opts"]["timeout"] == HUB_TIMEOUT
         assert "no_ssl_verify" not in cls.call_args.kwargs["opts"]
 
     def test_session_no_ssl_verify(self, mocker):
@@ -207,7 +214,7 @@ class TestKojiSession:
         hub_session.task_state(1)
         hub_session.task_state(2)
 
-        cls.assert_called_once_with(HUB, opts={})
+        cls.assert_called_once_with(HUB, opts={"timeout": HUB_TIMEOUT})
         mock_koji_session.ssl_login.assert_called_once_with("/c.pem", "/ca.crt", "/ca.crt")
 
     def test_no_ssl_verify(self, mock_koji_session, mocker):
@@ -217,7 +224,7 @@ class TestKojiSession:
 
         KojiSession(HUB, no_ssl_verify=True).task_state(1)
 
-        assert cls.call_args.kwargs["opts"] == {"no_ssl_verify": True}
+        assert cls.call_args.kwargs["opts"] == {"timeout": HUB_TIMEOUT, "no_ssl_verify": True}
 
     def test_context_manager_logs_out_at_outermost_exit(self, hub_session, mock_koji_session):
         with hub_session:

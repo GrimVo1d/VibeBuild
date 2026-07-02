@@ -71,12 +71,11 @@ def with_retry(
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             delay = initial_delay
-            last_exc: BaseException | None = None
-            for attempt in range(1, attempts + 1):
+            attempt = 1
+            while True:
                 try:
                     return fn(*args, **kwargs)
                 except Exception as exc:
-                    last_exc = exc
                     if attempt >= attempts:
                         raise
                     if not transient_check(exc):
@@ -92,9 +91,7 @@ def with_retry(
                     )
                     time.sleep(delay)
                     delay *= backoff
-            # Unreachable, but for the type checker
-            assert last_exc is not None
-            raise last_exc
+                    attempt += 1
 
         return wrapper  # type: ignore[return-value]
 

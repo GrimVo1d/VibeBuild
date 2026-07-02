@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -273,8 +275,7 @@ def main() -> int:
 
     get_package_info, SRPMFetcher, PackageNameResolver, MLPackageResolver = _import_vibebuild()
 
-    work_dir = Path("/tmp/vb-prod-validation")
-    work_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = Path(tempfile.mkdtemp(prefix="vb-prod-validation-"))
 
     name_resolver = PackageNameResolver()
     fetcher = SRPMFetcher(
@@ -318,6 +319,7 @@ def main() -> int:
             )
         else:
             print(f"FAIL @ {r['stage']}: {r['error']}", file=sys.stderr)
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     # Summary
     n_total = len(results)
