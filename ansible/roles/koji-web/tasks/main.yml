@@ -1,25 +1,25 @@
 ---
-- name: Install Koji Web packages
-  dnf:
+# koji-web needs jinja2 but does not require it
+- name: Install the Koji web UI
+  ansible.builtin.dnf:
     name:
       - koji-web
-      - python3-mod_wsgi
+      - python3-jinja2
     state: present
 
-- name: Configure Koji Web
-  template:
+- name: Configure the web UI
+  ansible.builtin.template:
     src: web.conf.j2
     dest: /etc/kojiweb/web.conf
     owner: root
     group: apache
-    mode: '0640'
+    mode: "0640"
   notify: Restart Apache
 
-- name: Configure Apache for Koji Web
-  template:
-    src: kojiweb.conf.j2
-    dest: /etc/httpd/conf.d/kojiweb.conf
+- name: Let the web UI read its certificate
+  ansible.builtin.file:
+    path: "{{ koji_pki_dir }}/kojiweb.pem"
     owner: root
-    group: root
-    mode: '0644'
+    group: apache
+    mode: "0640"
   notify: Restart Apache

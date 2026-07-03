@@ -1,48 +1,47 @@
 ---
 - name: Install PostgreSQL
-  dnf:
+  ansible.builtin.dnf:
     name:
       - postgresql-server
-      - postgresql-contrib
       - python3-psycopg2
     state: present
 
-- name: Check if PostgreSQL is initialized
-  stat:
-    path: /var/lib/pgsql/data/pg_hba.conf
-  register: postgres_data
+- name: Initialize the database cluster
+  ansible.builtin.command: postgresql-setup --initdb
+  args:
+    creates: /var/lib/pgsql/data/PG_VERSION
 
-- name: Initialize PostgreSQL database
-  command: postgresql-setup --initdb
-  when: not postgres_data.stat.exists
-
-- name: Configure PostgreSQL authentication
-  template:
+- name: Allow password logins for Koji from localhost only
+  ansible.builtin.template:
     src: pg_hba.conf.j2
     dest: /var/lib/pgsql/data/pg_hba.conf
     owner: postgres
     group: postgres
-    mode: '0600'
+    mode: "0600"
   notify: Restart PostgreSQL
 
-- name: Start and enable PostgreSQL
-  systemd:
+- name: Start PostgreSQL
+  ansible.builtin.systemd_service:
     name: postgresql
     state: started
-    enabled: yes
+    enabled: true
 
-- name: Create Koji database
-  become_user: postgres
-  postgresql_db:
-    name: "{{ postgresql_db }}"
-    encoding: UTF-8
-    state: present
+- name: Apply the authentication settings before Koji logs in
+  ansible.builtin.meta: flush_handlers
 
-- name: Create Koji database user
+- name: Create the Koji database role
+  become: true
   become_user: postgres
-  postgresql_user:
-    db: "{{ postgresql_db }}"
+  community.postgresql.postgresql_user:
     name: "{{ postgresql_user }}"
     password: "{{ postgresql_password }}"
-    priv: ALL
-    state: present
+  no_log: true
+
+# Owning the database gives the role the public schema on PostgreSQL 15+
+- name: Create the Koji database
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_db:
+    name: "{{ postgresql_db }}"
+    owner: "{{ postgresql_user }}"
+    encoding: UTF-8

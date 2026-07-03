@@ -1,5 +1,5 @@
 ---
-- name: Restart Koji Builder
-  systemd:
+- name: Restart kojid
+  ansible.builtin.systemd_service:
     name: kojid
     state: restarted

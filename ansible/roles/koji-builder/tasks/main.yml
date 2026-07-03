@@ -1,55 +1,30 @@
 ---
-- name: Install Koji Builder packages
-  dnf:
+- name: Install the Koji builder
+  ansible.builtin.dnf:
     name:
       - koji-builder
       - mock
-      - rpm-build
       - createrepo_c
-      - python3-koji
     state: present
 
-- name: Add kojid user to mock group
-  user:
+- name: Create the mock user
+  ansible.builtin.user:
     name: kojibuilder
+    system: true
     groups: mock
-    append: yes
+    append: true
 
-- name: Generate builder certificate
-  include_tasks: "{{ playbook_dir }}/roles/koji-hub/tasks/generate_user_cert.yml"
-  vars:
-    user_name: "kojibuilder"
-
-- name: Configure Koji Builder
-  template:
+- name: Configure the builder
+  ansible.builtin.template:
     src: kojid.conf.j2
     dest: /etc/kojid/kojid.conf
     owner: root
     group: root
-    mode: '0644'
-  notify: Restart Koji Builder
+    mode: "0644"
+  notify: Restart kojid
 
-- name: Create builder work directories
-  file:
-    path: "{{ item }}"
-    state: directory
-    owner: kojibuilder
-    group: kojibuilder
-    mode: '0755'
-  loop:
-    - /var/lib/kojid
-    - /var/tmp/koji
-
-- name: Configure mock
-  template:
-    src: mock-koji.cfg.j2
-    dest: /etc/mock/koji.cfg
-    owner: root
-    group: mock
-    mode: '0644'
-
-- name: Start and enable Koji Builder
-  systemd:
+- name: Start the builder
+  ansible.builtin.systemd_service:
     name: kojid
     state: started
-    enabled: yes
+    enabled: true

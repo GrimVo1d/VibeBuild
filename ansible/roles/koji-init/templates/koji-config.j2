@@ -1,0 +1,10 @@
+# Managed by Ansible
+[koji]
+server = {{ koji_hub_url }}
+weburl = {{ koji_web_url }}
+topurl = {{ koji_files_url }}
+authtype = ssl
+cert = {{ koji_pki_dir }}/{{ koji_admin_user }}.pem
+serverca = {{ koji_pki_dir }}/koji_ca_cert.crt
+target = {{ koji_target }}
+build_tag = {{ koji_build_tag }}

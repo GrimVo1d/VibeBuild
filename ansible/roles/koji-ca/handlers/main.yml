@@ -1,0 +1,4 @@
+---
+- name: Update the system CA bundle
+  ansible.builtin.command: update-ca-trust
+  changed_when: true

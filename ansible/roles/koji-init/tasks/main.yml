@@ -1,172 +1,99 @@
 ---
-- name: Wait for Koji Hub to be available
-  uri:
-    url: "https://{{ koji_hub_fqdn }}/koji"
-    validate_certs: no
-    status_code: 200
-  register: result
-  until: result.status == 200
+- name: Create the koji client directory for root
+  ansible.builtin.file:
+    path: /root/.koji
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configure the koji client for root
+  ansible.builtin.template:
+    src: koji-config.j2
+    dest: /root/.koji/config
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Wait for the hub
+  ansible.builtin.uri:
+    url: "{{ koji_hub_url }}"
+    method: POST
+    body: <?xml version="1.0"?><methodCall><methodName>getAPIVersion</methodName></methodCall>
+    headers:
+      Content-Type: text/xml
+  register: koji_hub_up
+  until: koji_hub_up is succeeded
   retries: 30
   delay: 5
 
-- name: Add admin user to Koji
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --weburl={{ koji_web_url }}
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-user {{ koji_admin_user }}
-  register: add_admin
-  failed_when: add_admin.rc != 0 and 'already exists' not in add_admin.stderr
-  changed_when: add_admin.rc == 0
+# The first admin cannot be granted through the hub, Koji's docs bootstrap it in SQL
+- name: Create the admin user
+  community.postgresql.postgresql_query:
+    login_host: 127.0.0.1
+    login_user: "{{ postgresql_user }}"
+    login_password: "{{ postgresql_password }}"
+    login_db: "{{ postgresql_db }}"
+    query: >-
+      INSERT INTO users (name, status, usertype)
+      SELECT %(name)s, 0, 0
+      WHERE NOT EXISTS (SELECT 1 FROM users WHERE name = %(name)s)
+    named_args:
+      name: "{{ koji_admin_user }}"
+  register: koji_admin_created
+  changed_when: koji_admin_created.rowcount > 0
 
-- name: Grant admin permissions
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    grant-permission admin {{ koji_admin_user }}
-  register: grant_admin
-  failed_when: grant_admin.rc != 0 and 'already has' not in grant_admin.stderr
-  changed_when: grant_admin.rc == 0
+- name: Grant the admin permission
+  community.postgresql.postgresql_query:
+    login_host: 127.0.0.1
+    login_user: "{{ postgresql_user }}"
+    login_password: "{{ postgresql_password }}"
+    login_db: "{{ postgresql_db }}"
+    query: >-
+      INSERT INTO user_perms (user_id, perm_id, creator_id, active)
+      SELECT u.id, p.id, u.id, TRUE FROM users u, permissions p
+      WHERE u.name = %(name)s AND p.name = 'admin'
+      AND NOT EXISTS (SELECT 1 FROM user_perms WHERE user_id = u.id
+                      AND perm_id = p.id AND active)
+    named_args:
+      name: "{{ koji_admin_user }}"
+  register: koji_admin_granted
+  changed_when: koji_admin_granted.rowcount > 0
 
-- name: Add builder host to Koji
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-host {{ ansible_hostname }} x86_64
-  register: add_host
-  failed_when: add_host.rc != 0 and 'already exists' not in add_host.stderr
-  changed_when: add_host.rc == 0
+- name: Set up the builder, tags, target, build groups and external repos
+  ansible.builtin.command:
+    argv: "{{ ['koji'] + item }}"
+  loop: "{{ koji_setup_commands }}"
+  register: koji_setup
+  changed_when: koji_setup.rc == 0
+  failed_when: koji_setup.rc != 0 and koji_setup.stderr is not search(koji_already_done)
 
-- name: Create destination tag
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-tag {{ koji_dest_tag }}
-  register: add_dest_tag
-  failed_when: add_dest_tag.rc != 0 and 'already exists' not in add_dest_tag.stderr
-  changed_when: add_dest_tag.rc == 0
+# add-group-pkg exits with 0 for packages already in the group, so compare first
+- name: Read the build groups
+  ansible.builtin.command:
+    argv: [koji, call, --json-output, getTagGroups, "{{ koji_build_tag }}"]
+  register: koji_groups
+  changed_when: false
 
-- name: Create build tag
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-tag {{ koji_build_tag }} --parent={{ koji_dest_tag }} --arches=x86_64
-  register: add_build_tag
-  failed_when: add_build_tag.rc != 0 and 'already exists' not in add_build_tag.stderr
-  changed_when: add_build_tag.rc == 0
-
-- name: Create build target
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-target {{ koji_target }} {{ koji_build_tag }} {{ koji_dest_tag }}
-  register: add_target
-  failed_when: add_target.rc != 0 and 'already exists' not in add_target.stderr
-  changed_when: add_target.rc == 0
-
-- name: Add external repositories
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-external-repo -t {{ koji_build_tag }} {{ item.name }} "{{ item.url }}"
-  loop: "{{ external_repos }}"
-  register: add_repo
-  failed_when: add_repo.rc != 0 and 'already exists' not in add_repo.stderr
-  changed_when: add_repo.rc == 0
-
-- name: Add build group
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-group {{ koji_build_tag }} build
-  register: add_group
-  failed_when: add_group.rc != 0 and 'already exists' not in add_group.stderr
-  changed_when: add_group.rc == 0
-
-- name: Add srpm-build group
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-group {{ koji_build_tag }} srpm-build
-  register: add_srpm_group
-  failed_when: add_srpm_group.rc != 0 and 'already exists' not in add_srpm_group.stderr
-  changed_when: add_srpm_group.rc == 0
-
-- name: Add packages to build group
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-group-pkg {{ koji_build_tag }} build {{ item }}
+- name: Fill the build groups
+  ansible.builtin.command:
+    argv: "{{ ['koji', 'add-group-pkg', koji_build_tag, item.group] + koji_missing }}"
+  vars:
+    koji_group: "{{ koji_groups.stdout | from_json | selectattr('name', '==', item.group) | first }}"
+    koji_missing: "{{ item.packages | difference(koji_group.packagelist | map(attribute='package')) }}"
   loop:
-    - bash
-    - bzip2
-    - coreutils
-    - cpio
-    - diffutils
-    - fedora-release
-    - findutils
-    - gawk
-    - glibc-minimal-langpack
-    - grep
-    - gzip
-    - info
-    - make
-    - patch
-    - redhat-rpm-config
-    - rpm-build
-    - sed
-    - shadow-utils
-    - tar
-    - unzip
-    - util-linux
-    - which
-    - xz
-  register: add_pkg
-  failed_when: add_pkg.rc != 0 and 'already' not in add_pkg.stderr
-  changed_when: add_pkg.rc == 0
+    - {group: build, packages: "{{ koji_build_group_packages }}"}
+    - {group: srpm-build, packages: "{{ koji_srpm_build_group_packages }}"}
+  loop_control:
+    label: "{{ item.group }}"
+  when: koji_missing | length > 0
+  register: koji_group_pkg
+  changed_when: true
 
-- name: Add packages to srpm-build group
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    add-group-pkg {{ koji_build_tag }} srpm-build {{ item }}
-  loop:
-    - bash
-    - fedora-release
-    - fedpkg-minimal
-    - gnupg2
-    - redhat-rpm-config
-    - rpm-build
-    - shadow-utils
-  register: add_srpm_pkg
-  failed_when: add_srpm_pkg.rc != 0 and 'already' not in add_srpm_pkg.stderr
-  changed_when: add_srpm_pkg.rc == 0
-
-- name: Regenerate repository
-  command: >
-    koji --server=https://{{ koji_hub_fqdn }}/kojihub
-    --cert=/etc/pki/koji/{{ koji_admin_user }}.pem
-    --serverca=/etc/pki/koji/koji_ca_cert.crt
-    regen-repo {{ koji_build_tag }}
-  async: 3600
-  poll: 30
-
-- name: Set default build target in koji client config
-  ini_file:
-    path: /etc/koji.conf
-    section: koji
-    option: target
-    value: "{{ koji_target }}"
-    create: yes
-  become: yes
+# Without kojira, a repo is created only on request; vibebuild requests the later ones.
+# The task waits for kojid, which the next role starts.
+- name: Create the first build repo
+  ansible.builtin.command:
+    argv: [koji, regen-repo, --make-task, --nowait, "{{ koji_build_tag }}"]
+  when: koji_setup is changed or koji_group_pkg is changed
+  changed_when: true

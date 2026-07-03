@@ -1,24 +1,11 @@
+# Managed by Ansible
 [web]
 SiteName = {{ koji_hub_fqdn }}
-KojiHubURL = https://{{ koji_hub_fqdn }}/kojihub
+KojiHubURL = {{ koji_hub_url }}
 KojiFilesURL = {{ koji_files_url }}
 
-WebCert = /etc/pki/koji/kojiweb.pem
-ClientCA = /etc/pki/koji/koji_ca_cert.crt
-KojiHubCA = /etc/pki/koji/koji_ca_cert.crt
+WebCert = {{ koji_pki_dir }}/kojiweb.pem
+KojiHubCA = {{ koji_pki_dir }}/koji_ca_cert.crt
 
 LoginTimeout = 72
-
-Secret = {{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=32') }}
-
-LibPath = /usr/share/koji-web/lib
-
-LiteralFooter = True
-
-LogoImagePath = /koji-static/images/koji.png
-
-Tasks = runroot, distRepo
-
-{% if koji_admin_user is defined %}
-AdminUsers = {{ koji_admin_user }}
-{% endif %}
+Secret = {{ kojiweb_secret }}

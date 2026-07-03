@@ -1,0 +1,62 @@
+---
+koji_build_group_packages:
+  - autoconf
+  - automake
+  - bash
+  - bzip2
+  - cargo
+  - cmake
+  - coreutils
+  - cpio
+  - createrepo_c
+  - diffutils
+  - fedora-release
+  - findutils
+  - gawk
+  - gcc
+  - gcc-c++
+  - golang
+  - grep
+  - gzip
+  - info
+  - libtool
+  - make
+  - meson
+  - ninja-build
+  - patch
+  - pkgconf-pkg-config
+  - redhat-rpm-config
+  - rpm-build
+  - rust
+  - sed
+  - shadow-utils
+  - tar
+  - unzip
+  - util-linux
+  - which
+  - xz
+
+koji_srpm_build_group_packages:
+  - bash
+  - fedora-release
+  - redhat-rpm-config
+  - rpm-build
+  - shadow-utils
+
+# koji commands that create something; "already exists" counts as done
+koji_setup_commands:
+  - [add-host, "{{ koji_builder_host }}", "{{ koji_arch }}"]
+  - [add-host-to-channel, "{{ koji_builder_host }}", createrepo]
+  - [add-tag, "{{ koji_dest_tag }}", "--arches={{ koji_arch }}"]
+  - [add-tag, "{{ koji_build_tag }}", "--parent={{ koji_dest_tag }}", "--arches={{ koji_arch }}"]
+  - [add-target, "{{ koji_target }}", "{{ koji_build_tag }}", "{{ koji_dest_tag }}"]
+  - [add-group, "{{ koji_build_tag }}", build]
+  - [add-group, "{{ koji_build_tag }}", srpm-build]
+  - [add-external-repo, "f{{ fedora_version }}-releases",
+     "{{ fedora_mirror }}/releases/{{ fedora_version }}/Everything/$arch/os/"]
+  - [add-external-repo, "f{{ fedora_version }}-updates",
+     "{{ fedora_mirror }}/updates/{{ fedora_version }}/Everything/$arch/"]
+  - [add-external-repo, -t, "{{ koji_build_tag }}", -p, "5", "f{{ fedora_version }}-releases"]
+  - [add-external-repo, -t, "{{ koji_build_tag }}", -p, "10", "f{{ fedora_version }}-updates"]
+
+koji_already_done: "already (exists|in the database|subscribed|associated)"

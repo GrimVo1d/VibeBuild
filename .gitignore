@@ -58,3 +58,4 @@ perf_bench.json
 
 # Ansible
 *.retry
+ansible/credentials/

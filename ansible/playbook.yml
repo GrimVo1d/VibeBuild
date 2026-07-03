@@ -1,36 +1,32 @@
 ---
-- name: Deploy Koji Build System
+- name: Deploy a single-host Koji for VibeBuild
   hosts: koji
-  become: yes
+  become: true
 
   pre_tasks:
-    - name: Update system packages
-      dnf:
-        name: "*"
-        state: latest
-      tags: [setup]
-
-    - name: Install EPEL repository (if needed)
-      dnf:
-        name: epel-release
-        state: present
-      ignore_errors: yes
-      tags: [setup]
+    - name: Check that the example host name is replaced
+      ansible.builtin.assert:
+        that: koji_hub_fqdn != "koji.internal"
+        fail_msg: "Set koji_hub_fqdn in group_vars/all.yml"
+      tags: [always]
 
   roles:
     - role: postgresql
       tags: [database]
+    - role: koji-ca
+      tags: [ca]
     - role: koji-hub
       tags: [hub]
-    - role: koji-builder
-      tags: [builder]
     - role: koji-web
       tags: [web]
+    # After init: kojid logging in before `koji add-host` would create a plain user
     - role: koji-init
       tags: [init]
+    - role: koji-builder
+      tags: [builder]
 
   post_tasks:
-    - name: Display Koji Web URL
-      debug:
-        msg: "Koji Web UI available at: {{ koji_web_url }}"
+    - name: Show the web UI address
+      ansible.builtin.debug:
+        msg: "Koji web UI: {{ koji_web_url }}"
       tags: [always]

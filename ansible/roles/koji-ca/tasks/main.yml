@@ -1,0 +1,114 @@
+---
+- name: Create the Koji PKI directory
+  ansible.builtin.file:
+    path: "{{ koji_pki_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create the CA key
+  community.crypto.openssl_privatekey:
+    path: "{{ koji_pki_dir }}/koji_ca_cert.key"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Create the CA certificate request
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ koji_pki_dir }}/koji_ca_cert.key"
+    organization_name: "{{ koji_cert_org }}"
+    common_name: "{{ koji_cert_org }} Koji CA"
+    use_common_name_for_san: false
+    basic_constraints: ["CA:TRUE"]
+    basic_constraints_critical: true
+    key_usage: [keyCertSign, cRLSign]
+    key_usage_critical: true
+  register: koji_ca_csr
+  changed_when: false
+
+- name: Create the CA certificate
+  community.crypto.x509_certificate:
+    path: "{{ koji_pki_dir }}/koji_ca_cert.crt"
+    csr_content: "{{ koji_ca_csr.csr }}"
+    privatekey_path: "{{ koji_pki_dir }}/koji_ca_cert.key"
+    provider: selfsigned
+    selfsigned_not_after: "+3650d"
+    owner: root
+    group: root
+    mode: "0644"
+
+# Mock copies the host CA bundle into build roots, so builds can fetch repos from the hub
+- name: Trust the Koji CA on this host
+  ansible.builtin.copy:
+    src: "{{ koji_pki_dir }}/koji_ca_cert.crt"
+    dest: /etc/pki/ca-trust/source/anchors/koji_ca_cert.crt
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Update the system CA bundle
+
+- name: Use the new CA bundle in the rest of the play
+  ansible.builtin.meta: flush_handlers
+
+- name: Create the certificate keys
+  community.crypto.openssl_privatekey:
+    path: "{{ koji_pki_dir }}/{{ item.name }}.key"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ koji_certs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create the certificate requests
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "{{ koji_pki_dir }}/{{ item.name }}.key"
+    organization_name: "{{ koji_cert_org }}"
+    common_name: "{{ item.cn }}"
+    subject_alt_name: "{{ item.san | default(omit) }}"
+    use_common_name_for_san: false
+    key_usage: [digitalSignature, keyEncipherment]
+    extended_key_usage: "{{ item.usage }}"
+  loop: "{{ koji_certs }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: koji_csrs
+  changed_when: false
+
+- name: Sign the certificates with the CA
+  community.crypto.x509_certificate:
+    path: "{{ koji_pki_dir }}/{{ item.item.name }}.crt"
+    csr_content: "{{ item.csr }}"
+    provider: ownca
+    ownca_path: "{{ koji_pki_dir }}/koji_ca_cert.crt"
+    ownca_privatekey_path: "{{ koji_pki_dir }}/koji_ca_cert.key"
+    ownca_not_after: "+3650d"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ koji_csrs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+# Koji clients take the certificate and its key as one PEM file
+- name: Read the client certificates and keys
+  ansible.builtin.slurp:
+    src: "{{ koji_pki_dir }}/{{ item.0.name }}.{{ item.1 }}"
+  loop: "{{ koji_certs | rejectattr('server', 'defined') | product(['crt', 'key']) }}"
+  loop_control:
+    label: "{{ item.0.name }}.{{ item.1 }}"
+  register: koji_client_parts
+  no_log: true
+
+- name: Bundle the client certificates with their keys
+  ansible.builtin.copy:
+    content: "{{ item.0.content | b64decode }}{{ item.1.content | b64decode }}"
+    dest: "{{ koji_pki_dir }}/{{ item.0.item.0.name }}.pem"
+    owner: root
+    mode: "{{ item.0.item.0.pem_mode | default('0600') }}"
+  loop: "{{ koji_client_parts.results | batch(2) }}"
+  loop_control:
+    label: "{{ item.0.item.0.name }}.pem"
+  no_log: true

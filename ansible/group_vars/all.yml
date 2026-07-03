@@ -1,34 +1,36 @@
 ---
+# One Fedora host runs PostgreSQL, the hub, the web UI and the builder.
 koji_hub_fqdn: "koji.internal"
+koji_hub_url: "https://{{ koji_hub_fqdn }}/kojihub"
 koji_web_url: "https://{{ koji_hub_fqdn }}/koji"
 koji_files_url: "https://{{ koji_hub_fqdn }}/kojifiles"
 
-postgresql_db: "koji"
-postgresql_user: "koji"
-postgresql_password: "{{ vault_postgresql_password | default('changeme') }}"
+fedora_version: 44
+fedora_mirror: "https://dl.fedoraproject.org/pub/fedora/linux"
+koji_dest_tag: "f{{ fedora_version }}"
+koji_build_tag: "f{{ fedora_version }}-build"
+koji_target: "f{{ fedora_version }}"
+koji_arch: "{{ ansible_facts['architecture'] }}"
 
 koji_admin_user: "kojiadmin"
-koji_admin_email: "admin@example.internal"
+# Koji host name of the builder; it is also the CN of the builder certificate
+koji_builder_host: "kojibuilder"
 
-ssl_cert_country: "XX"
-ssl_cert_state: "State"
-ssl_cert_city: "City"
-ssl_cert_org: "VibeBuild"
-ssl_cert_ou: "Build System"
+koji_pki_dir: /etc/pki/koji
+koji_cert_org: "VibeBuild"
 
-koji_build_tag: "f42-build"
-koji_dest_tag: "f42"
-koji_target: "f42"
+postgresql_db: "koji"
+postgresql_user: "koji"
 
-external_repos:
-  - name: "fedora-base"
-    url: "https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch"
-  - name: "fedora-updates"
-    url: "https://mirrors.fedoraproject.org/mirrorlist?repo=updates-released-f$releasever&arch=$basearch"
+# Generated on the control node on the first run and kept in ansible/credentials/
+# (git-ignored). Override them, e.g. from a vault, to use your own.
+postgresql_password: >-
+  {{ lookup('ansible.builtin.password', playbook_dir ~ '/credentials/postgresql_password',
+  length=32, chars=['ascii_letters', 'digits']) }}
+kojiweb_secret: >-
+  {{ lookup('ansible.builtin.password', playbook_dir ~ '/credentials/kojiweb_secret',
+  length=32, chars=['ascii_letters', 'digits']) }}
 
-mock_chroot: "fedora-42-x86_64"
-
+# PostgreSQL listens on localhost only and the web UI is served over HTTPS
 firewall_ports:
-  - 80/tcp
   - 443/tcp
-  - 5432/tcp

@@ -1,23 +1,20 @@
-Alias /kojihub /usr/share/koji-hub/kojixmlrpc.py
+# Managed by Ansible; replaces the file from koji-hub, TLS is set up in ssl.conf
+Alias /kojihub /usr/share/koji-hub/kojiapp.py
 
+WSGIDaemonProcess kojihub user=apache group=apache processes=2 threads=4 lang=C.UTF-8
 <Directory "/usr/share/koji-hub">
     Options ExecCGI
     SetHandler wsgi-script
+    WSGIProcessGroup kojihub
     WSGIApplicationGroup %{GLOBAL}
     Require all granted
 </Directory>
 
 Alias /kojifiles "/mnt/koji/"
 
-<Directory "/mnt/koji/">
+<Directory "/mnt/koji">
     Options Indexes SymLinksIfOwnerMatch
     AllowOverride None
     IndexOptions +NameWidth=*
     Require all granted
 </Directory>
-
-<Location /kojihub/ssllogin>
-    SSLVerifyClient require
-    SSLVerifyDepth  10
-    SSLOptions +StdEnvVars
-</Location>

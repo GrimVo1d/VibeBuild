@@ -1,0 +1,21 @@
+---
+# Certificates signed by the Koji CA. The hub uses its key and certificate as
+# they are; clients (server not set) get a .pem bundle of both.
+koji_certs:
+  - name: kojihub
+    cn: "{{ koji_hub_fqdn }}"
+    san: ["DNS:{{ koji_hub_fqdn }}"]
+    usage: [serverAuth]
+    server: true
+  # The web UI logs users in to the hub on their behalf (ProxyDNs in hub.conf);
+  # the koji-web role gives the apache group read access to its bundle
+  - name: kojiweb
+    cn: kojiweb
+    usage: [clientAuth]
+    pem_mode: "0640"
+  - name: "{{ koji_admin_user }}"
+    cn: "{{ koji_admin_user }}"
+    usage: [clientAuth]
+  - name: "{{ koji_builder_host }}"
+    cn: "{{ koji_builder_host }}"
+    usage: [clientAuth]
