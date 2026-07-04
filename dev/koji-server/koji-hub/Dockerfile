@@ -1,8 +1,9 @@
 ARG FEDORA_VERSION=44
 FROM fedora:${FEDORA_VERSION}
 
+# koji-web needs jinja2 but does not require it
 RUN dnf install -y \
-    koji-hub koji-web \
+    koji-hub koji-web python3-jinja2 \
     httpd mod_ssl mod_wsgi \
     postgresql python3-psycopg2 \
     curl \

@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-koji}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kojisecret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make setup to create .env}
       POSTGRES_DB: ${POSTGRES_DB:-koji}
     volumes:
       - koji-db-data:/var/lib/postgresql/data
@@ -31,8 +31,9 @@ services:
       - koji-data:/mnt/koji
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-koji}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kojisecret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run make setup to create .env}
       POSTGRES_DB: ${POSTGRES_DB:-koji}
+      KOJIWEB_SECRET: ${KOJIWEB_SECRET:?run make setup to create .env}
     networks:
       - koji-net
     healthcheck:

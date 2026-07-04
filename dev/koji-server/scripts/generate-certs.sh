@@ -74,8 +74,8 @@ generate_cert "kojiweb" "koji-web" "serverAuth,clientAuth" "DNS:localhost,DNS:ko
 generate_cert "kojiadmin" "kojiadmin" "clientAuth"
 generate_cert "kojibuilder" "kojibuilder" "clientAuth"
 
-chmod 644 *.crt *.pem
-chmod 600 *.key
+chmod 644 *.crt
+chmod 600 *.key *.pem
 
 rm -f koji_ca_cert.srl
 

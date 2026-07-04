@@ -4,7 +4,9 @@ COMPOSE = docker compose
 
 .env:
 	@cp .env.default .env
-	@echo "Created .env from .env.default"
+	@printf 'POSTGRES_PASSWORD=%s\nKOJIWEB_SECRET=%s\n' "$$(openssl rand -hex 16)" "$$(openssl rand -hex 32)" >> .env
+	@chmod 600 .env
+	@echo "Created .env from .env.default with generated secrets"
 
 # Generated in a Fedora container (OpenSSL 3, same as the hub) and handed back to the host user.
 certs: .env
