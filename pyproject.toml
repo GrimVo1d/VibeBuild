@@ -68,7 +68,8 @@ check_untyped_defs = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --cov=vibebuild --cov-report=term-missing"
+addopts = "-v --cov=vibebuild --cov-report=term-missing -m 'not integration'"
+markers = ["integration: needs the dev Koji stand, run with -m integration inside vibebuild-dev"]
 
 [tool.coverage.run]
 source = ["vibebuild"]

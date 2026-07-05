@@ -92,7 +92,7 @@ def mock_subprocess_run(mocker):
 
 
 @pytest.fixture(autouse=True)
-def mock_koji_session(mocker):
+def mock_koji_session(request, mocker):
     """Global stub for `vibebuild.builder.koji.ClientSession`, so that any
     test that calls `build_with_deps` / `build_package` does not go to a
     real koji-hub and does not hang in polling loops.
@@ -105,7 +105,10 @@ def mock_koji_session(mocker):
 
     A test can override any of these behaviors via
     `mock_koji_session.<method>.return_value = ...` or `.side_effect = ...`.
+    Integration tests talk to the real hub and get no stub.
     """
+    if request.node.get_closest_marker("integration"):
+        return None
     session = Mock()
     session.build.return_value = 12345
     session.newRepo.return_value = 999
@@ -123,70 +126,3 @@ def mock_koji_session(mocker):
     session.listTagged.return_value = []
     mocker.patch("vibebuild.koji_client.koji.ClientSession", return_value=session)
     return session
-
-
-@pytest.fixture
-def temp_srpm(tmp_path, sample_spec_content):
-    """Create a temporary SRPM-like file for testing."""
-    srpm = tmp_path / "test-package-1.0-1.src.rpm"
-    srpm.write_text("fake srpm content")
-    spec = tmp_path / "test-package.spec"
-    spec.write_text(sample_spec_content)
-    return srpm
-
-
-@pytest.fixture
-def mock_package_info():
-    """Mock PackageInfo for testing."""
-    from vibebuild.analyzer import BuildRequirement, PackageInfo
-
-    return PackageInfo(
-        name="test-package",
-        version="1.0",
-        release="1",
-        build_requires=[
-            BuildRequirement(name="python3-devel"),
-            BuildRequirement(name="gcc"),
-            BuildRequirement(name="make", version="4.0", operator=">="),
-        ],
-        source_urls=["https://example.internal/test-package-1.0.tar.gz"],
-    )
-
-
-@pytest.fixture
-def mock_build_result():
-    """Mock BuildResult for testing."""
-    from vibebuild.builder import BuildResult, BuildStatus, BuildTask
-
-    task = BuildTask(
-        package_name="test-package",
-        srpm_path="/path/to/test.src.rpm",
-        target="fedora-target",
-        task_id=12345,
-        status=BuildStatus.COMPLETE,
-        nvr="test-package-1.0-1.fc40",
-    )
-    return BuildResult(
-        success=True,
-        tasks=[task],
-        built_packages=["test-package"],
-        failed_packages=[],
-        total_time=60.0,
-    )
-
-
-def pytest_configure(config):
-    """Configure pytest markers."""
-    config.addinivalue_line("markers", "unit: mark test as unit test")
-    config.addinivalue_line("markers", "integration: mark test as integration test")
-    config.addinivalue_line("markers", "slow: mark test as slow running")
-
-
-def pytest_collection_modifyitems(config, items):
-    # Default classification: a test is unit unless explicitly marked
-    # integration or slow. Lets `pytest -m unit` work as the docs promise
-    # without forcing every test author to add the marker by hand.
-    for item in items:
-        explicit = {m.name for m in item.iter_markers()}
-        if not explicit & {"integration", "slow"}:
-            item.add_marker("unit")
