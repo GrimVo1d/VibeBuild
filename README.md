@@ -1,210 +1,158 @@
 # VibeBuild
 
-**Koji extension for automatic dependency resolution and building**
-
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Conventional Commits](https://img.shields.io/badge/Conventional%20Commits-1.0.0-yellow.svg)](https://www.conventionalcommits.org/)
 
-VibeBuild extends Koji with automatic dependency resolution. When building a package, VibeBuild finds the missing BuildRequires, downloads their SRPMs from Fedora and builds the whole dependency chain in the right order.
+A command-line tool that builds an RPM package in Koji together with the build dependencies Koji does not have yet.
 
-## Features
+`koji build` fails as soon as one `BuildRequires` is missing from the build tag. VibeBuild reads the BuildRequires from the SRPM header, asks your Koji which of them are missing, downloads their SRPMs from Fedora Koji, does the same for their dependencies, and submits the whole chain level by level, dependencies first.
 
-- **Automatic dependency analysis** — parses SRPM/spec files to extract BuildRequires
-- **Smart package name resolution** — automatically converts virtual provides (`python3dist(requests)`, `pkgconfig(glib-2.0)`, `perl(File::Path)`) and RPM macros (`%{python3_pkgversion}`) into real package names
-- **ML name resolution** — an optional scikit-learn model (TF-IDF + KNN) as a fallback when the rules do not match
-- **SRPM download** — automatically downloads missing packages from Fedora Koji with smart SRPM name mapping (for example, `python3-requests` -> `python-requests`)
-- **DAG construction** — determines the build order from dependencies
-- **Build orchestration** — sequential builds that wait for the repository to regenerate
-- **CLI** — a convenient command-line tool with flexible options
-
-## Quick start
-
-### Installation
-
-Clone the repository and install in editable mode:
-
-```bash
-cd vibebuild
-pip install -e ".[dev,ml]"   # development + full ML
-pip install -e ".[dev]"      # without ML
-pip install -e ".[ml]"       # ML only, no dev tools
-pip install -e .             # minimum
-```
-
-### Usage
-
-Basic form: `vibebuild [OPTIONS] SRPM` or `vibebuild [OPTIONS] TARGET SRPM`.
-SRPM can be a path to a `.src.rpm` file or a **package name** (for example, `python3`).
-If TARGET is not given, it is taken from the `target` key in `~/.koji/config [koji]`.
-
-```bash
-# One command: target from ~/.koji/config, download the SRPM by name and build
-vibebuild python-requests
-vibebuild python3
-
-# Explicit target (or if the target is not in the config)
-vibebuild fedora-target python-requests
-vibebuild fedora-target my-package-1.0-1.fc40.src.rpm
-
-# Scratch build (no tagging)
-vibebuild --scratch fedora-target my-package.src.rpm
-
-# Build without dependency resolution (a single package only)
-vibebuild --no-deps fedora-target my-package.src.rpm
-
-# Dependency analysis without building (one argument: path to an SRPM)
-vibebuild --analyze-only my-package.src.rpm
-
-# Download an SRPM from Fedora by package name (requires the koji CLI)
-vibebuild --download-only python-requests
-
-# Dry run — show the build order and what will be built
-vibebuild --dry-run my-package.src.rpm
-
-# Name resolution options
-vibebuild --no-ml fedora-target my-package.src.rpm              # rules only
-vibebuild --no-name-resolution fedora-target my-package.src.rpm # raw names
-vibebuild --ml-model /path/to/model.npz fedora-target my-package.src.rpm
-```
-
-A step-by-step demo (download, analysis, dry-run, build) is in the "First build: step by step" section of [QUICKSTART.md](docs/QUICKSTART.md#7-first-build-step-by-step).
-
-### Verification
-
-After installing, you can check that everything works:
-
-```bash
-vibebuild --version
-vibebuild --help
-```
-
-If `[dev]` is installed, run the tests from the project root:
-
-```bash
-pytest
-```
-
-To check dependency resolution on a real package (requires the `koji` CLI and access to Fedora Koji):
-
-```bash
-vibebuild --download-only python-requests
-vibebuild --analyze-only python-requests-*.src.rpm   # use the downloaded file
-vibebuild --dry-run python-requests          # target from ~/.koji/config
-vibebuild --dry-run fedora-43 python-requests  # explicit target
-```
-
-Without `koji`, use any `.src.rpm` you have for `--analyze-only` and `--dry-run`.
-
-### Using your own Koji server
-
-If you already have a Koji, `vibebuild` reads `~/.koji/config` (and `/etc/koji.conf`) to get `server`, `cert`, `serverca`, `target` and `build_tag`, so it is often enough to pass `--server` to override. All options: `vibebuild --help`.
-
-```bash
-# After setting up ~/.koji/config with target = my-target:
-vibebuild my-package.src.rpm
-
-vibebuild --server https://koji.internal/kojihub my-target my-package.src.rpm
-# or with explicit certificates:
-vibebuild --server https://koji.internal/kojihub --cert ~/.koji/client.pem \
-  --serverca ~/.koji/serverca.crt --build-tag my-build my-target my-package.src.rpm
-```
-
-## Local server (Docker)
-
-The repository includes a ready-made Docker environment for local development and testing:
-
-```bash
-cd dev/koji-server
-make setup    # Full setup: certificates, DB, Hub, Builder, client
-```
-
-After setup, Koji is available at https://localhost:8443/koji.
-
-
-## Koji deployment
-
-The repository includes an Ansible playbook for automatic Koji deployment on Fedora:
-
-```bash
-cd ansible
-
-# Configure the inventory (set YOUR_VPS_IP and ansible_user)
-vim inventory/hosts.ini
-
-# Configure the variables (FQDN, passwords, etc.)
-vim group_vars/all.yml
-
-# Run the playbook
-ansible-playbook -i inventory/hosts.ini playbook.yml
-```
-
-## How it works
-
-```
-┌─────────────────┐
-│  vibebuild CLI  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│   Analyzer      │────▶│  Parse SRPM     │
-│                 │     │  Extract deps   │
-└────────┬────────┘     └─────────────────┘
-         │
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│   Name resolver │────▶│ Macro expansion │
-│ (rules + ML)    │     │ Name resolution │
-└────────┬────────┘     └─────────────────┘
-         │
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│   Dependency    │────▶│  Koji check     │
-│   resolver      │     │  Build DAG      │
-└────────┬────────┘     └─────────────────┘
-         │
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│   Fetcher       │────▶│  Download       │
-│                 │     │  from Fedora    │
-└────────┬────────┘     └─────────────────┘
-         │
-         ▼
-┌─────────────────┐     ┌─────────────────┐
-│   Builder       │────▶│  koji build     │
-│                 │     │  wait-repo      │
-└─────────────────┘     └─────────────────┘
-```
-
-1. **Analyzer** — extracts BuildRequires from the SRPM/spec file, expands RPM macros
-2. **Name resolver** — converts virtual provides and macro-based names into real RPM package names (rules + optional ML)
-3. **Dependency resolver** — checks which dependencies are missing in Koji and builds the dependency graph
-4. **Fetcher** — downloads SRPMs for the missing packages from Fedora with smart name mapping
-5. **Builder** — builds the packages in the right order, waiting for the repository to regenerate between builds
-
-## Training the ML model (optional)
-
-The model is not shipped with the package. Train it on the provides of a Fedora release:
-
-```bash
-vibebuild train --release 44                          # saves ~/.local/share/vibebuild/model.npz
-vibebuild train --release 44 --save-data data.json    # also keep the collected data
-vibebuild train --data data.json --output model.npz   # retrain without downloading
-```
-
-The training data come from the repository metadata of Fedora Everything, checked by sha256 from the Fedora metalink. The model uses TF-IDF character n-grams with K-Nearest Neighbors to predict real package names from virtual dependency strings. It is stored as plain NumPy arrays (`.npz`, no pickle). Use `--ml-model` to point to another model.
+- Turns BuildRequires into package names: virtual provides (`python3dist(requests)`, `pkgconfig(glib-2.0)`, `perl(File::Path)`), RPM macros and RPM-to-SRPM names (`python3-requests` → `python-requests`). An optional ML model covers names the rules do not know.
+- Verifies every downloaded SRPM against the digest Fedora Koji recorded for the build.
+- Regenerates the build repo between levels itself, so it works on a hub without `kojira`.
+- Skips packages that are already built in the destination tag, so an interrupted chain can simply be run again.
 
 ## Requirements
 
-- **Python** 3.9+
-- **koji** CLI — required for `--download-only` (downloading SRPMs from Fedora Koji) and for building. Without it these features are unavailable. Install: `sudo dnf install koji` (Fedora) or the equivalent for your distribution.
-- **rpm-build**, **rpm2cpio** (for unpacking and building SRPMs; on Fedora: `dnf install rpm-build`)
-- Access to a Koji server (for example, Fedora Koji for downloading; your own for building)
+- Python 3.12 or newer, Linux.
+- `rpm` to read SRPM headers, and the Koji Python library (`python3-koji` on Fedora).
+- `rpmbuild` for `--patch-specs`; `bwrap` (bubblewrap) to sandbox it.
+- A Koji hub you can build on, with a client certificate. Fedora Koji is used anonymously, to download SRPMs.
 
-**Optional (ML name resolution):** `scikit-learn >= 1.3` — install: `pip install -e ".[ml]"`.
+## Installation
+
+```bash
+git clone https://github.com/GrimVo1d/VibeBuild.git
+cd VibeBuild
+python3 -m venv --system-site-packages .venv   # sees python3-koji and rpm from the system
+. .venv/bin/activate
+pip install .            # or ".[ml]" for the ML name resolver
+```
+
+## Configuration
+
+VibeBuild reads the `[koji]` section of `~/.koji/config`, then `/etc/koji.conf`, the same files the `koji` CLI uses:
+
+```ini
+[koji]
+server = https://koji.internal/kojihub
+cert = ~/.koji/client.pem
+serverca = ~/.koji/serverca.crt
+target = f44
+build_tag = f44-build
+```
+
+`--server`, `--cert`, `--serverca` and `--build-tag` override the file. `target` is the default build target when the command line names none. Without a `server`, VibeBuild talks to Fedora Koji.
+
+## Usage
+
+```
+vibebuild [OPTIONS] [TARGET] SRPM
+vibebuild train [OPTIONS]
+```
+
+`SRPM` is a path to a `.src.rpm` or a package name. A name is downloaded from Fedora Koji first: the latest build of the release that matches the target (`f44` → Fedora 44), or `--fedora-release`, or rawhide. Downloads are cached in `~/.cache/vibebuild/srpms`.
+
+```bash
+# Build a package and everything it needs; the target comes from ~/.koji/config
+vibebuild python-requests
+
+# Explicit target, local SRPM
+vibebuild f44 my-package-1.0-1.fc44.src.rpm
+
+# What is missing in the build tag, without building
+vibebuild --analyze-only f44 python-requests
+
+# The build plan, level by level, without submitting anything
+vibebuild --dry-run python-requests
+
+# Only download the SRPM
+vibebuild --download-only python-requests
+
+# Scratch build of the target; its missing dependencies are still regular builds
+vibebuild --scratch python-requests
+
+# Only this package, no dependency resolution
+vibebuild --no-deps my-package.src.rpm
+```
+
+Other options:
+
+| Option | Effect |
+| --- | --- |
+| `--build-all-deps` | Build every dependency locally, even if the tag's external repos provide it. On a real package the graph quickly reaches the toolchain and grows to hundreds of packages. |
+| `--patch-specs` | Rebuild each SRPM with `%check` removed before submitting it, and retry once a build that fails on unpackaged files. Off by default: rebuilding runs `rpmbuild -bs`, which executes the spec's macros. It runs under bubblewrap when available. |
+| `--nowait` | Submit the target build and do not wait for it. |
+| `--no-name-resolution` | Use BuildRequires as they are. |
+| `--no-ml`, `--ml-model PATH` | Rules only, or a different ML model. |
+| `-v`, `-q`, `--log-format json` | Log level and format. |
+
+`vibebuild --help` lists all of them.
+
+After a build VibeBuild prints a summary: the tagged target and dependencies, the toolchains found in the BuildRequires, and every task with its status (`✓` built, `=` already built, `✗` failed).
+
+Exit codes: `0` on success, `1` when a build fails or Koji, the SRPM or the download is not usable, `2` on invalid arguments.
+
+## ML fallback
+
+Some BuildRequires do not map to a package name by any rule. For those VibeBuild can ask a nearest-neighbour model (character n-gram TF-IDF + KNN, scikit-learn) trained on the provides of a Fedora release. The rules handle most names; the model is only consulted when they fail.
+
+The model is not part of the package. Train it once:
+
+```bash
+pip install ".[ml]"
+vibebuild train --release 44                          # ~/.local/share/vibebuild/model.npz
+vibebuild train --release 44 --save-data f44.json     # also keep the collected pairs
+vibebuild train --data f44.json --output model.npz    # retrain without downloading
+```
+
+Training data come from the Fedora Everything repodata, checked by sha256 through the Fedora metalink. On Fedora 44 that is about 355,000 provide → package pairs and a 16 MB model; on a held-out set it names the right source package first in 65% of cases. The model is saved as plain NumPy arrays, without pickle. Without scikit-learn or a model VibeBuild works with the rules alone.
+
+## Local Koji stand
+
+`dev/koji-server` runs a complete Koji in Docker: PostgreSQL, hub with the web UI, a builder with mock, and a client container with VibeBuild installed from the working tree. The build tag gets the Fedora release and updates repos as external repos.
+
+```bash
+cd dev/koji-server
+make setup                               # .env with generated secrets, certificates, all containers
+docker compose exec vibebuild-dev bash   # the client
+vibebuild --dry-run python-requests      # inside the client
+```
+
+The web UI is at <https://localhost:8443/koji> (published on 127.0.0.1 only). The stand has no `kojira`: VibeBuild creates repos itself, and `make regen-repo` does it by hand. The first repo after `make setup` takes a few minutes. `make init` re-runs the hub setup and is safe to repeat, `make stop` stops the containers, `make clean` also removes the volumes, certificates and `.env`. The Fedora release is `FEDORA_VERSION` in `.env`.
+
+## Deploying Koji
+
+`ansible/` installs Koji on a single Fedora 44 machine: PostgreSQL, a CA with server and client certificates, hub, web UI, a builder and the tags and target VibeBuild expects.
+
+```bash
+cd ansible
+ansible-galaxy collection install -r requirements.yml
+# inventory/hosts.ini: replace YOUR_SERVER_IP (and ansible_user if it is not fedora)
+# group_vars/all.yml:  set koji_hub_fqdn
+ansible-playbook -i inventory/hosts.ini playbook.yml
+```
+
+Passwords and secrets are generated on the first run into `ansible/credentials/`, which git ignores. Root on the server gets a `~/.koji/config` with the admin certificate. `kojira` is not installed; VibeBuild regenerates repos itself.
+
+## Development
+
+```bash
+python3 -m venv --system-site-packages .venv && . .venv/bin/activate
+pip install -e ".[dev,ml]"
+pre-commit install
+pytest                   # unit tests with coverage; Koji, rpm and network are mocked
+pre-commit run --all-files
+```
+
+Integration tests run against the local stand, inside the client container:
+
+```bash
+cd dev/koji-server
+docker compose exec vibebuild-dev pytest -m integration
+```
 
 ## Documentation
 
-- [QUICKSTART.md](docs/QUICKSTART.md) — introduction from scratch: RPM/SRPM/Koji concepts, modules, first build step by step
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — system architecture
+- [Getting started](docs/GETTING_STARTED.md): RPM, SRPM and Koji concepts and a first build step by step.
+- [Architecture](docs/ARCHITECTURE.md): modules, the build flow, performance and the ML resolver.
