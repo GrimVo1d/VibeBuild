@@ -1,347 +1,175 @@
-# VibeBuild Architecture
+# Architecture
 
-VibeBuild is an extension of the Koji build system that automates dependency resolution when building RPM packages.
-
-The standard `koji build` command builds a single package and requires all BuildRequires to already be available in the Koji repository. If a dependency is missing, the build fails. VibeBuild solves this: it analyzes the SRPM, recursively downloads the missing dependencies from Fedora, builds a dependency DAG and builds the packages in the right order.
+How VibeBuild turns one SRPM into a chain of Koji builds. The concepts (tags, targets, repos, virtual provides) are explained in [GETTING_STARTED.md](GETTING_STARTED.md); installation and options in the [README](../README.md).
 
 ## Contents
 
-- [Top-Level Architecture](#top-level-architecture)
-- [Application Layers](#application-layers)
-- [Data Flow](#data-flow)
-- [Package Name Resolution](#package-name-resolution)
-- [DAG Construction and Build Order](#dag-construction-and-build-order)
-- [Koji Tags and Targets](#koji-tags-and-targets)
-- [Exception Hierarchy](#exception-hierarchy)
-- [Conventions and Caching](#conventions-and-caching)
+- [Overview](#overview)
+- [Modules](#modules)
+- [The build flow](#the-build-flow)
+- [What counts as missing](#what-counts-as-missing)
+- [Package names](#package-names)
+- [Build order](#build-order)
+- [Talking to Koji](#talking-to-koji)
+- [SRPMs: download and patching](#srpms-download-and-patching)
+- [ML resolver](#ml-resolver)
+- [Performance](#performance)
+- [Errors, exit codes and logs](#errors-exit-codes-and-logs)
 
----
-
-## Top-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       User (CLI)                             │
-└─────────────────────────────┬───────────────────────────────┘
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      VibeBuild                               │
-│  ┌──────────┐  ┌───────────────┐  ┌──────────┐  ┌────────┐ │
-│  │ analyzer │  │ name_resolver │  │ resolver │  │ builder│ │
-│  │          │  │ + ml_resolver │  │          │  │        │ │
-│  └──────────┘  └───────────────┘  └──────────┘  └────────┘ │
-│                ┌──────────┐                                  │
-│                │ fetcher  │                                  │
-│                └──────────┘                                  │
-└─────────────────┬───────────────────────────────────────────┘
-                  │
-        ┌─────────┼──────────────┐
-        ▼         ▼              ▼
-  ┌─────────┐ ┌───────────┐ ┌──────────────────┐
-  │Koji Hub │ │Fedora Koji│ │src.fedoraproject │
-  │(local)  │ │(external) │ │(SRPM source)     │
-  └────┬────┘ └───────────┘ └──────────────────┘
-       ▼
-  ┌─────────┐
-  │ kojid   │
-  │ + mock  │
-  └─────────┘
-```
-
----
-
-## Application Layers
-
-The `vibebuild/` package contains eight modules. The entry point is `cli.py:main` (console script `vibebuild`).
-
-### `analyzer.py` — SRPM analysis
-
-Parses SRPMs and spec files, extracts metadata.
-
-**Key elements:**
-
-- `BuildRequirement` — dataclass: name, version, comparison operator
-- `PackageInfo` — dataclass: name, version, release, build_requires, source_urls
-- `SpecAnalyzer` — spec file parser
-- `get_build_requires(srpm_path) -> list[str]` — extracts only the BuildRequires list via `rpm -qp --requires`
-- `get_package_info_from_srpm(srpm_path) -> PackageInfo` — unpacks the SRPM via `rpm2cpio | cpio`, parses the .spec
-
-**Spec parsing algorithm:**
-
-1. Read the file line by line
-2. Extract the fields `Name:`, `Version:`, `Release:`, `BuildRequires:`, `Source:`
-3. Expand RPM macros (`%{name}`, `%{version}`)
-4. Parse BuildRequires with operators (`>=`, `<=`, `>`, `<`, `=`)
-
-### `name_resolver.py` — rule-based name resolution
-
-Spec files often contain virtual dependency names that do not match the real RPMs. `PackageNameResolver` implements the pipeline:
+## Overview
 
 ```
-Input → Cache → Macro expansion → Provides patterns → ML fallback → Result
+                         vibebuild CLI
+                              │
+     ┌──────────────┬─────────┴────────┬──────────────────┐
+     ▼              ▼                  ▼                  ▼
+  analyzer    name_resolver        resolver            builder
+  (rpm -qp)   (+ ml_resolver)   (graph, order)   (submit, wait, newRepo)
+                    │                  │                  │
+                    │            koji_client ◄────────────┤
+                    ▼                  │                  ▼
+                 fetcher               │             spec_patcher
+                    │                  │          (--patch-specs only)
+                    ▼                  ▼
+          Fedora Koji + kojipkgs   your Koji hub ──► builders (mock)
+          (SRPMs, anonymous)       (XML-RPC, client certificate)
 ```
 
-**Components:**
+Two Koji hubs are involved. Your hub, from `~/.koji/config` or `--server`, is asked what the build tag has and receives the builds. Fedora Koji is only read: it tells VibeBuild which build is the latest for a release and what its SRPM's digest is, and `kojipkgs.fedoraproject.org` serves the file.
 
-- `SYSTEM_MACROS` — a table of 18 RPM system macros (`%{python3_pkgversion}` → `3`, `%{_bindir}` → `/usr/bin`, etc.)
-- `PROVIDE_PATTERNS` — 9 compiled regex patterns with transformer functions: `python(\d*)dist(X)` → `python{N}-{X}`, `pkgconfig(X)` → `{X}-devel`, `perl(X::Y)` → `perl-X-Y`, `rubygem`, `npm`, `cmake`, `tex`, `golang`, `mvn`
-- `SUBPACKAGE_TO_SRPM` — a hardcoded subpackage → SRPM mapping (≈380 entries) (`perl-File-Path` → `perl`, `python3-libs` → `python3.13`, `gcc-c++` → `gcc`)
-- `resolve_srpm_name(rpm_name) -> list[str]` — generates SRPM name variants to download
+## Modules
 
-### `ml_resolver.py` — ML fallback (optional)
+| Module | Role |
+| --- | --- |
+| `cli.py` | Argument parsing, `~/.koji/config` loading, the four modes (build, `--analyze-only`, `--download-only`, `--dry-run`), the build summary. `vibebuild train` is dispatched to `training.py` before parsing. |
+| `analyzer.py` | Reads name, version, release and BuildRequires from the SRPM header with `rpm -qp --qf`. The header has the spec's macros already expanded; `rpmlib(...)` and file dependencies are dropped. |
+| `name_resolver.py` | Rule-based names: rich dependencies, macros, virtual provides, RPM → SRPM candidates. Falls back to the ML resolver. |
+| `ml_resolver.py` | Optional nearest-neighbour model for names the rules cannot handle. |
+| `training.py` | `vibebuild train`: Fedora repodata → provide/package pairs → model, with a held-out evaluation. |
+| `resolver.py` | Decides which BuildRequires are missing from the build tag, builds the dependency graph and the build levels. |
+| `koji_client.py` | `KojiClient`, anonymous and cached, for questions; `KojiSession`, logged in, for uploads, builds, task polling and repos. |
+| `builder.py` | `KojiBuilder` runs a whole build: repo check, levels, retries, the target, the result. |
+| `fetcher.py` | Downloads SRPMs from Fedora Koji and verifies them. |
+| `spec_patcher.py` | With `--patch-specs`: unpacks an SRPM, edits the spec, rebuilds the SRPM in a sandbox. |
+| `toolchain.py` | Classifies BuildRequires by language and build system for the summary. |
+| `_retry.py` | Exponential backoff for transient download errors. |
+| `_logging.py` | JSON log formatter for `--log-format json`. |
+| `exceptions.py` | The exception hierarchy. |
 
-Runs when the rule-based patterns could not handle a virtual provide.
+## The build flow
 
-**Model architecture:**
+`vibebuild f44 python-requests` runs `KojiBuilder.build_with_deps`:
 
-```
-input → TF-IDF (char n-grams 2-5, max 50k features)
-     → KNN (cosine distance, k=5)
-     → distance ≤ 0.3 → (rpm_name, srpm_name)
-     → distance > 0.3 → None (low confidence)
-```
+1. **Get the SRPM.** A path is used as is; a name is downloaded from Fedora Koji, from the release that matches the target (`f44` → `f44-updates`, then `f44`), `--fedora-release`, or rawhide.
+2. **Look up the target** on your hub: its build tag and destination tag.
+3. **Log in once.** `KojiSession` holds a single logged-in session for the whole run.
+4. **Make the build repo current.** If the build tag or anything it inherits changed since its last repo, start `newRepo` and wait for it.
+5. **Resolve.** Read the target's BuildRequires, find the missing ones, download their SRPMs, read *their* BuildRequires, and so on, until nothing new is missing. The result is a list of levels.
+6. **Build the levels.** Submit every package of a level, poll until all finish, retry unpackaged-file failures (with `--patch-specs`). If anything was built, regenerate the repo before the next level.
+7. **Build the target**, if every dependency succeeded, the same way, waiting for it unless `--nowait`.
+8. **Report.** What was tagged into the destination tag, which toolchains the BuildRequires use, and every task with its state.
 
-- `MLPackageResolver` — a wrapper around the scikit-learn model
-- Gating via the `HAS_SKLEARN` flag: without `scikit-learn` the module is silently disabled
-- The model is saved to `vibebuild/data/model.joblib` (~5–15 MB)
-- Predictions are cached in `~/.cache/vibebuild/ml_name_cache.json`
+`--dry-run` stops after step 5 and prints the levels. `--analyze-only` only does the first round of step 5, for the target itself, without downloading. `--no-deps` skips steps 4 to 6.
 
-Training uses `scripts/collect_training_data.py` (parses `primary.xml` from the Fedora repositories) and `scripts/train_model.py`.
+## What counts as missing
 
-### `resolver.py` — building the dependency DAG
+`DependencyResolver.find_missing_deps` decides, for each BuildRequires, whether it has to be built:
 
-**Key classes:**
+1. The name is resolved (`python3dist(idna)` → `python3-idna`).
+2. If the package is in the build tag's package list (inheritance included) but has no build there, it is missing. Being listed means "this Koji owns it".
+3. If it has a build, a version constraint from the spec (`>= 3.7`) is checked against the latest build; a build that is too old makes it missing.
+4. Otherwise the SRPM name candidates are tried the same way (`python3-idna` → `python-idna`).
+5. If the build tag has external repos, a dependency this Koji does not own is assumed to come from them and is not built. `--build-all-deps` turns this off and builds every dependency locally.
 
-- `KojiClient` — Koji client via the CLI (`subprocess`). Methods: `list_packages(tag)`, `package_exists(pkg, tag)`, `list_tagged_builds(tag)`, `search_package(pattern)`
-- `DependencyNode` — graph node: `name`, `srpm_path`, `dependencies`, `is_available`, `build_order`
-- `DependencyResolver` — the main class:
-  - `find_missing_deps(deps, tag)` — filters out the dependencies missing in Koji
-  - `build_dependency_graph(pkg, srpm, srpm_resolver)` — recursive traversal
-  - `topological_sort()` — Kahn algorithm; detects cycles
-  - `get_build_chain()` — groups nodes by level (`build_order`)
+Without external repos every dependency without a build is missing. The root package is always analysed, even when a build of it exists, because a new version can need dependencies the old one did not. Lookups for all names of one package go to the hub in a single multicall.
 
-`find_missing_deps()` normalizes names via `name_resolver.resolve()` before checking in Koji.
+## Package names
 
-**Graph construction algorithm:**
+`PackageNameResolver.resolve` runs a pipeline and caches the answer per run:
 
-1. Start with the root package
-2. For each package:
-   - If it is in the Koji tag → `is_available = True`
-   - Otherwise: extract BuildRequires, find the missing ones, process recursively
-3. Topological sort
-4. Group by level: packages without dependencies are level 0; a package level = max(level of dependencies) + 1; packages on the same level are built in parallel
+1. **Rich dependencies:** `(python3dist(tomli) if python3-devel < 3.11)` → `python3dist(tomli)`.
+2. **Macros:** a small table of macros that do not change between releases (`%{python3_pkgversion}`, `%{_bindir}`, ...). Version macros are left alone rather than guessed.
+3. **Virtual provides:** nine patterns.
+4. **ML fallback**, only for names that still look like a provide, i.e. contain `(`.
+5. Otherwise the name as it is.
 
-### `fetcher.py` — SRPM download
-
-**Sources (by priority):**
-
-| # | Source | Method |
-|---|---|---|
-| 1 | Fedora Koji (`koji.fedoraproject.org`) | `koji download-build --type=src` |
-| 2 | `src.fedoraproject.org` | Download spec + sources, local build via `rpmbuild -bs` |
-
-**Key classes:**
-
-- `SRPMSource` — source configuration (name, URL, priority)
-- `SRPMFetcher` — downloader with caching and optional disabling of SSL verification
-
-If a `name_resolver` is passed, `download_srpm()` uses `resolve_srpm_name()` to try SRPM name variants: for example, `python3-requests` is tried both as `python-requests` and as `python3-requests`.
-
-### `builder.py` — build orchestration
-
-**Key elements:**
-
-- `BuildStatus` — enum: `PENDING`, `BUILDING`, `COMPLETE`, `FAILED`, `CANCELED`
-- `BuildTask` — a build task: `package_name`, `srpm_path`, `target`, `task_id`, `status`
-- `BuildResult` — the outcome: `success`, `tasks`, `built_packages`, `failed_packages`, `total_time`
-- `KojiBuilder` — the orchestrator; holds `KojiClient`, `DependencyResolver`, `SRPMFetcher`
-
-**The `build_with_deps(srpm_path)` method — the main function:**
-
-1. Parse the SRPM (`get_package_info_from_srpm`)
-2. Build the DAG (`build_dependency_graph`, recursively downloading the missing ones)
-3. Get the build chain (`get_build_chain`)
-4. For each level:
-   - `koji build --nowait` for all packages of the level
-   - Polling until completion
-   - `koji wait-repo` — wait for the repository to regenerate
-5. Build the target package
-6. Return `BuildResult`
-
-Without waiting for `wait-repo`, the builds of the next level would fail with a dependency not found error.
-
-### `cli.py` — CLI
-
-Argument parsing, cascading configuration loading:
-
-```
-CLI flags (highest priority)
-    ↓
-~/.koji/config
-    ↓
-/etc/koji.conf (fallback)
-```
-
-Creates `PackageNameResolver`, `SRPMFetcher`, `DependencyResolver`, `KojiBuilder` and dispatches to the right mode (full build, `--analyze-only`, `--download-only`, `--dry-run`, `--no-deps`, `--scratch`).
-
-### `__main__.py`
-
-Allows running via `python -m vibebuild`, delegates to `cli.main`.
-
-### `exceptions.py`
-
-See the section [Exception Hierarchy](#exception-hierarchy).
-
----
-
-## Data Flow
-
-```
-SRPM file                                                        RPM packages
-    │                                                                   ▲
-    ▼                                                                   │
-analyzer ──► PackageInfo ──► name_resolver ──► normalized names        │
-                                  │                                     │
-                                  ▼                                     │
-                              resolver ◄── KojiClient (tag check)       │
-                                  │                                     │
-                                  ├─► find_missing ──► fetcher ──► SRPM │
-                                  │                       │             │
-                                  │           ◄───────────┘             │
-                                  ▼                                     │
-                              DAG → topological sort → build chain      │
-                                  │                                     │
-                                  ▼                                     │
-                              builder ──► koji build (per level)───────┘
-                                  │           │
-                                  │           ▼
-                                  └─► wait-repo between levels
-```
-
----
-
-## Package Name Resolution
-
-Example transformations:
-
-| In the spec file | Real RPM name | SRPM name |
-|---|---|---|
-| `python3dist(requests)` | `python3-requests` | `python-requests` |
-| `python3dist(setuptools)` | `python3-setuptools` | `python-setuptools` |
-| `%{python3_pkgversion}-devel` | `python3-devel` | `python3` |
-| `pkgconfig(glib-2.0)` | `glib-2.0-devel` | `glib-2.0` |
-| `perl(File::Path)` | `perl-File-Path` | `perl` |
-| `cmake(Qt5Core)` | `cmake-qt5core` | — |
-| `npm(typescript)` | `nodejs-typescript` | `nodejs-typescript` |
+| BuildRequires | Resolved name | SRPM candidates |
+| --- | --- | --- |
+| `python3dist(requests)` | `python3-requests` | `python-requests`, `requests`, `python3-requests` |
+| `perl(File::Path)` | `perl-File-Path` | `perl-File-Path` |
 | `rubygem(bundler)` | `rubygem-bundler` | `rubygem-bundler` |
-| `golang(github.com/foo/bar)` | `golang-github.com-foo-bar` | — |
+| `npm(typescript)` | `nodejs-typescript` | `nodejs-typescript` |
 | `mvn(org.apache:commons-lang)` | `commons-lang` | `commons-lang` |
+| `pkgconfig(glib-2.0)` | `glib-2.0-devel` | `glib-2.0`, `glib-2.0-devel` |
+| `gcc-c++` | `gcc-c++` | `gcc`, `gcc-c++` |
 
-**`name_resolver` integration points:**
+`resolve_srpm_name` turns a binary name into SRPM candidates, most likely first: a table of about 230 known subpackages (`gcc-c++` → `gcc`), then suffix and prefix rules (`-devel`, `-libs`, `python3-`). The `pkgconfig`, `cmake` and `golang` patterns are rough: `pkgconfig(glib-2.0)` is really provided by `glib2-devel`. When downloading, the ML prediction is tried before these rules, which is where the model helps most.
 
-- `analyzer` — better macro expansion via `SYSTEM_MACROS`
-- `resolver` — name normalization before checking in Koji
-- `fetcher` — trying SRPM variants via `resolve_srpm_name()`
-- `builder` — creates the resolver and passes it to all components
+## Build order
 
-The ML resolver is optional (`pip install -e ".[ml]"`); without `scikit-learn` it silently degrades.
+`resolver.py` keeps a node per package with the dependencies that have to be built. `topological_sort` is Kahn's algorithm; if some packages can never be scheduled, there is a cycle and it raises `CircularDependencyError`. `get_build_chain` gives every package a level, one more than its highest dependency, and returns the levels without the root, which the builder builds last.
 
----
+Within a level packages do not depend on each other, so they are submitted together and Koji runs them in parallel on its builders. A failed package does not stop the later levels: whatever builds is tagged, and the next run skips it. The target is built only when all its dependencies succeeded.
 
-## DAG Construction and Build Order
+SRPMs of the missing dependencies of one package are downloaded in parallel, five at a time, and the graph is then walked in a fixed order, so the plan does not depend on which download finished first.
 
-Example: we build `my-app`, which depends on `lib-foo`, `lib-bar`, `lib-baz`. `lib-foo` depends on `lib-base`, `lib-baz` on `lib-core`. `lib-bar`, `lib-base`, `lib-core` are already in Koji.
+## Talking to Koji
 
-```
-       my-app
-      /   |   \
-  lib-foo lib-bar(ok) lib-baz
-     │              │
-  lib-base(ok)   lib-core(ok)
-```
+Everything goes through the Koji Python library over XML-RPC; the `koji` command is not used.
 
-**Topological sort (Kahn algorithm):**
+- **`KojiClient`** is anonymous. It answers questions about tags, builds and targets, and caches latest-build lookups for the run. The builder clears the cache after a newRepo, when new builds may have appeared. `prefetch_latest_builds` asks for many packages in one multicall.
+- **`KojiSession`** logs in with the client certificate. The hub serialises calls per user and refuses a second login in a row with `AuthLockError`, so one run uses one session for everything. `submit` adds the package to the destination tag's package list, uploads the SRPM and starts the build. If Koji reports that the NVR is already built, nothing is submitted and the task is marked already built; the builder also checks the destination tag for the NVR before uploading.
+- **Repos.** There may be no `kojira` on the hub, so VibeBuild starts `newRepo` itself and waits for the task. `repo_is_current` compares the repo's creation event with changes to the build tag and its parents, so an unchanged tag is not regenerated.
+- **Timeouts.** Every hub call has a 300-second timeout (`HUB_TIMEOUT`; the library's default is 12 hours). Anonymous calls are retried by the library. A build is waited for up to 2 hours, a newRepo up to 30 minutes.
+- **Unpackaged files.** When a build fails, the tail of `build.log` of the task and its subtasks is read. If it contains "Installed (but unpackaged) file(s) found" and `--patch-specs` is on, the SRPM is rebuilt with `%define _unpackaged_files_terminate_build 0` and submitted once more.
 
-1. Compute the in-degree of every node
-2. Nodes with in-degree = 0 → queue
-3. Take nodes from the queue, decrease the in-degree of their dependents
-4. Cycle detection: if not all nodes were processed → `CircularDependencyError`
+## SRPMs: download and patching
 
-**Grouping by level:**
+`SRPMFetcher` looks the build up on Fedora Koji (`getLatestBuilds` in `f<N>-updates`, then `f<N>`; rawhide's build tag for rawhide), downloads its SRPM from `kojipkgs.fedoraproject.org` over HTTPS and checks it against the build's `payloadhash`. That is the MD5 Koji recorded for the RPM header and payload. VibeBuild computes it from the file's bytes, not from the RPM's own signature header, which only says what the file claims. A file that does not match is never moved into place.
 
-- Level 0: `lib-foo`, `lib-baz` (in parallel)
-- `koji wait-repo`
-- Level 1: `my-app`
+Downloads land in `~/.cache/vibebuild/srpms` (`$XDG_CACHE_HOME`, `--download-dir`). A cached file is reused only if it still matches the digest of the current latest build. Package names and NVRs from Koji are checked against a strict pattern before they become paths or URLs, and a download larger than 4 GiB is aborted.
 
----
+`--patch-specs` rebuilds SRPMs before submitting them. `spec_patcher` unpacks the SRPM with `rpm2archive` and Python's `tarfile` data filter, capped at 8 GiB, removes the `%check` section, optionally adds the unpackaged-files macro, and runs `rpmbuild -bs`. Parsing a spec executes its `%(...)` and `%{lua:...}` macros, so `rpmbuild` runs under bubblewrap: no network, a read-only `/usr`, no `$HOME`, only the work directory writable. Where bwrap is missing or cannot create namespaces, it runs without a sandbox and logs a warning. That is why the option is off by default; without it SRPMs go to Koji untouched.
 
-## Koji Tags and Targets
+## ML resolver
 
-```
-fedora-target (Build Target)
-    ├── build_tag: fedora-build  (BuildRoot, inherits from dest)
-    └── dest_tag:  fedora-dest   (storage for finished packages)
+`MLPackageResolver` maps a dependency string to an RPM and an SRPM name by similarity to provides it has seen.
 
-fedora-build → external Fedora repositories (base + updates)
-```
+- **Data.** `vibebuild train --release N` follows the Fedora metalink to a mirror's `repomd.xml`, checks it by the metalink's sha256, then downloads `primary.xml` checked by the sha256 in `repomd.xml`. Every virtual provide of a binary package (`python3dist(...)`, `pkgconfig(...)`, `perl(...)`, ...), and every prefixed alias such as `python3-foo` on a package named otherwise, becomes a pair with its RPM and SRPM name. Shared-library and file provides are skipped.
+- **Model.** TF-IDF over character 2- to 5-grams (20,000 features) and cosine nearest neighbours (k = 10). The nearest provide decides the SRPM if its distance is at most 0.3; among the neighbours from that SRPM the most canonical RPM name wins (`python3-X` over `python3.13-X`, then the shorter one). Anything further away gets no answer.
+- **Storage.** `~/.local/share/vibebuild/model.npz` holds plain arrays (names, vocabulary, idf weights) and is loaded with `allow_pickle=False`, so a model file cannot run code. The TF-IDF matrix is recomputed on load, about 10 seconds for a full release, which keeps the file at 16 MB instead of about 280 MB.
+- **Loading.** scikit-learn is imported and the model loaded only on the first prediction, so commands that never need ML do not pay for them. Without scikit-learn or a model file the resolver reports itself unavailable and the rules work alone.
 
-**Build process:**
+Metrics from `vibebuild train --release 44` (x86_64, July 2026): 355,260 pairs, 5% held out, 500 of those evaluated. The model answered for 97.2% of them; when it answered, the SRPM was right in 64.6% and the exact RPM name in 28.6%.
 
-1. The SRPM is uploaded to Koji
-2. Mock creates a chroot from the `fedora-build` packages
-3. The package is built in an isolated environment
-4. The result is tagged into `fedora-dest`
-5. The `fedora-build` repository is regenerated
+Limitations:
 
----
+- The held-out provides come from packages the model has seen through their other provides, so these numbers are optimistic for really unknown names.
+- The exact RPM name is right much less often than the SRPM. The SRPM is what gets downloaded, so it is the answer that matters.
+- A model describes one release. Train it for the release you build against.
+- The rules already resolve the common prefixes, so the model matters for a minority of names. How much it adds over the rules on real packages has not been measured yet.
 
-## Exception Hierarchy
+## Performance
 
-The root is `VibeBuildError`. All VibeBuild exceptions inherit from it, so they can be caught with a single `except`.
+- **Lazy imports.** scikit-learn and the model load on first use; `vibebuild --help` does not touch them.
+- **Fewer hub calls.** Latest-build lookups are cached per run and fetched in multicalls; the repo is regenerated only when the tag changed.
+- **Parallel downloads** of dependency SRPMs, and a verified SRPM cache across runs.
+- **Adaptive polling.** Tasks are polled every 2 seconds for the first 30 seconds, every 10 seconds up to 3 minutes, then every 30 seconds.
+- **Idempotent runs.** An NVR already in the destination tag is not rebuilt, so an interrupted chain can simply be run again.
+- **Retries.** Downloads retry transient network errors three times with exponential backoff; programming errors are not retried. Anonymous hub calls are retried by the Koji library.
+
+## Errors, exit codes and logs
 
 ```
 VibeBuildError
-├── InvalidSRPMError          — invalid SRPM
-├── SpecParseError            — spec parsing error
-├── DependencyResolutionError — dependency resolution error
+├── InvalidSRPMError            not an SRPM, or rpm cannot read it
+├── SRPMNotFoundError           no such file, or no build in Fedora Koji
+├── DependencyResolutionError
 │   └── CircularDependencyError
-├── SRPMNotFoundError         — SRPM not found in any source
-├── KojiBuildError            — build error in Koji
-├── KojiConnectionError       — Koji Hub connection error
-└── NameResolutionError       — package name resolution error
+├── KojiBuildError              submission refused by the hub
+└── KojiConnectionError         the hub cannot be reached
 ```
 
----
+The CLI exits with 0 on success, 1 on any failure, and 2 on invalid arguments. A failed build is not an exception: it is a task in the result with its state and a short error, and makes the exit code 1.
 
-## Conventions and Caching
-
-**Python:**
-
-- Minimum version is 3.9. Use `dict[]`/`list[]` (PEP 585), no walrus operator in code where 3.9 compatibility matters.
-- Tests mock `koji`/`subprocess`/`requests` — a real Koji server is not needed for unit tests.
-
-**Configuration:**
-
-- Loaded from `~/.koji/config` (primary), `/etc/koji.conf` (fallback)
-- CLI flags override the configs
-
-**Caches:**
-
-| Cache | Where |
-|---|---|
-| Packages available in a Koji tag | Memory, per session |
-| Downloaded SRPMs | the fetcher `download_dir` |
-| Dependency graph | Memory, built once |
-| Resolved names | Memory, per session |
-| ML predictions | `~/.cache/vibebuild/ml_name_cache.json` (persistent) |
-
-**Parallelism:**
-
-- Packages on the same DAG level are built in parallel (`koji build --nowait`)
-- SRPM download can run in parallel with analysis
-
-**Security:**
-
-- SSL client certificates for authentication in Koji
-- CA verification for HTTPS
-- All builds are isolated in a mock chroot
+Logs go to stderr; the summary goes to stdout. `-v` adds debug messages, `-q` keeps only warnings and errors, and `--log-format json` writes one JSON object per line for log collectors.
