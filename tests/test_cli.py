@@ -113,7 +113,7 @@ class TestCreateParser:
             ("--build-tag", "build_tag", "custom-build"),
             ("--download-dir", "download_dir", "/tmp/downloads"),
             ("--fedora-release", "fedora_release", "44"),
-            ("--ml-model", "ml_model", "/m.joblib"),
+            ("--ml-model", "ml_model", "/m.npz"),
         ],
     )
     def test_options(self, option, attr, value):
@@ -197,9 +197,9 @@ class TestNameResolverFor:
 
     def test_passes_ml_options(self):
         with patch("vibebuild.cli.create_name_resolver") as create:
-            resolver = name_resolver_for(make_opts("--no-ml", "--ml-model", "/m.joblib"))
+            resolver = name_resolver_for(make_opts("--no-ml", "--ml-model", "/m.npz"))
 
-        create.assert_called_once_with(no_ml=True, ml_model_path="/m.joblib")
+        create.assert_called_once_with(no_ml=True, ml_model_path="/m.npz")
         assert resolver is create.return_value
 
 

@@ -1,17 +1,15 @@
-"""Patching spec files inside an SRPM before sending to koji.
+"""Patching spec files inside an SRPM before sending it to Koji.
 
-Applied to all SRPMs (the target and dependencies) before submit when enabled.
-Two transformations are applied:
+When enabled, applied to every SRPM (the target and its dependencies) before
+submit. Two transformations:
 
-1. The `%check` section is cut out entirely: upstream testsuites often require
-   network access, specific pid/process limits and other things that our
-   sandbox mock does not have; instead we rely on a separate smoke install after
-   tagging. Always applied.
-2. Optionally added at the start of the spec:
-   `%define _unpackaged_files_terminate_build 0`, so that unpackaged files left in BUILDROOT
-   do not fail the build. Applied conditionally, only on
-   retry after a build that failed with Installed (but unpackaged) file(s) found
-   (see the retry logic in `vibebuild/builder.py`).
+1. The `%check` section is cut out entirely: upstream testsuites often need
+   network access, process limits and other things a mock buildroot does not
+   have. Always applied.
+2. `%define _unpackaged_files_terminate_build 0` is added at the start of the
+   spec, so that files left unpackaged in the buildroot do not fail the build.
+   Only on the retry after a build failed with "Installed (but unpackaged)
+   file(s) found" (see the retry logic in `vibebuild/builder.py`).
 
 Both mechanisms are standard RPM/Fedora: the macro is documented in upstream
 `/usr/lib/rpm/macros`, `%check` is an ordinary optional spec section.
