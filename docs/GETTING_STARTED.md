@@ -16,14 +16,14 @@ This page is for anyone who has not worked with RPM packaging or Koji before. It
 RPM is the package format of Fedora, RHEL, CentOS Stream, AlmaLinux and Rocky Linux. An `.rpm` file holds compiled programs, libraries and configuration; `dnf install` installs it. The file name carries the package's identity:
 
 ```
-python3-requests-2.32.3-4.fc44.noarch.rpm
+python3-requests-2.33.1-1.fc44.noarch.rpm
 ^                ^      ^ ^    ^
 name             |      | |    architecture
            version      | dist tag (Fedora 44)
                   release
 ```
 
-Name, version and release together are the **NVR**, `python3-requests-2.32.3-4.fc44`, which identifies a build.
+Name, version and release together are the **NVR**, `python3-requests-2.33.1-1.fc44`, which identifies a build.
 
 ### SRPM
 
@@ -41,8 +41,8 @@ The recipe inside an SRPM:
 
 ```spec
 Name:           python-requests
-Version:        2.32.3
-Release:        4%{?dist}
+Version:        2.33.1
+Release:        1%{?dist}
 
 BuildRequires:  python3-devel
 BuildRequires:  python3dist(idna)
@@ -136,12 +136,12 @@ Packages of one level are independent, so they are submitted together. Between l
 `koji build` builds one SRPM. If a BuildRequires is in neither the build tag nor its external repos, the buildroot cannot be installed and the task fails:
 
 ```
-$ koji build f44 python-requests-2.32.3-4.fc44.src.rpm
+$ koji build f44 python-requests-2.33.1-1.fc44.src.rpm
 ...
-No matching package to install: 'python3dist(idna)'
-...
-FAILED: BuildrootError: could not init mock buildroot
+FAILED: BuildError: error building package (arch noarch), mock exited with status 30; see root.log for more information
 ```
+
+and the task's `root.log` names the culprit: `No matching package to install: 'python3dist(idna)'`.
 
 Fixing that by hand means:
 
@@ -207,20 +207,24 @@ vibebuild --dry-run python-requests
 ```
 DRY RUN - showing what would be built:
 
-Target package: python-requests-2.32.3-4.fc44
+Target package: python-requests-2.33.1-1.fc44
 
 Dependencies to build (1):
   Level 1: python-idna
-Then: python-requests-2.32.3-4.fc44
+Then: python-requests-2.33.1-1.fc44
 ```
 
 ### Step 3. Build
 
 ```bash
-vibebuild python-requests
+vibebuild --patch-specs python-requests
 ```
 
-VibeBuild submits `python-idna`, waits for it, regenerates the `f44-build` repo, then builds and tags `python-requests`. Run the same command again: `python-idna` is no longer missing, and `python-requests` is reported as already built (`=`). Nothing is submitted.
+VibeBuild submits `python-idna`, waits for it, regenerates the `f44-build` repo, then builds and tags `python-requests`. On the stand this takes about 20 minutes, a good part of it in repo regeneration.
+
+`--patch-specs` removes the `%check` section before submitting. Without it the `python-idna` part works the same, but `python-requests` fails in its own tests: four of them expect a connection to an unroutable address to time out, and the stand's Docker network refuses it at once. That is the kind of build `--patch-specs` is for. The client container has no bubblewrap, so VibeBuild warns that it parses the spec without a sandbox.
+
+Run the same command again: `python-idna` is no longer missing, and `python-requests` is reported as already built (`=`). Nothing is submitted.
 
 ### Step 4. Look at the result
 
@@ -257,7 +261,7 @@ make clean && make setup            # start over
 | Hub | The central Koji server, an XML-RPC API over PostgreSQL |
 | kojira | The Koji service that regenerates repos automatically; VibeBuild does not need it |
 | Mock | The tool that creates a fresh chroot for each build |
-| NVR | Name-version-release, e.g. `python-requests-2.32.3-4.fc44` |
+| NVR | Name-version-release, e.g. `python-requests-2.33.1-1.fc44` |
 | Repo | The dnf repository Koji generates from a build tag |
 | Requires | What is installed together with a package |
 | Scratch build | A build that is kept but never tagged |
