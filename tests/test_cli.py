@@ -352,7 +352,6 @@ class TestCmdDownload:
         mock_fetcher.assert_called_once_with(
             download_dir=str(tmp_path),
             fedora_release="44",
-            no_ssl_verify=True,
             name_resolver=mock_nr.return_value,
         )
         assert "Downloaded: /path/to/pkg.src.rpm" in capsys.readouterr().out

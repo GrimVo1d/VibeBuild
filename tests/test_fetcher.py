@@ -199,13 +199,13 @@ class TestDownloadSrpm:
         with pytest.raises(SRPMNotFoundError, match="no rawhide target"):
             SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
 
-    def test_no_ssl_verify(self, tmp_path, hub, http, digest, mocker):
+    def test_always_verifies_tls(self, tmp_path, hub, http, digest, mocker):
         cls = mocker.patch("vibebuild.fetcher.koji.ClientSession", return_value=hub)
 
-        SRPMFetcher(download_dir=str(tmp_path), no_ssl_verify=True).download_srpm("PyYAML")
+        SRPMFetcher(download_dir=str(tmp_path)).download_srpm("PyYAML")
 
-        assert cls.call_args.kwargs["opts"]["no_ssl_verify"] is True
-        assert http.call_args.kwargs["verify"] is False
+        assert "no_ssl_verify" not in cls.call_args.kwargs["opts"]
+        assert "verify" not in http.call_args.kwargs
 
 
 class TestDownloadFile:

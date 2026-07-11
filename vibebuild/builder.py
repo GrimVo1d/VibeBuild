@@ -116,7 +116,6 @@ class KojiBuilder:
         self.fetcher = SRPMFetcher(
             download_dir=download_dir,
             fedora_release=fedora_release,
-            no_ssl_verify=no_ssl_verify,
             name_resolver=name_resolver,
         )
 

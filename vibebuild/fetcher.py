@@ -76,7 +76,6 @@ class SRPMFetcher:
         self,
         download_dir: str | None = None,
         fedora_release: str = "rawhide",
-        no_ssl_verify: bool = False,
         name_resolver=None,
         koji_server: str = FEDORA_KOJI,
         packages_url: str = FEDORA_PACKAGES,
@@ -88,7 +87,6 @@ class SRPMFetcher:
             self.download_dir = default_download_dir()
             self.download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.fedora_release = fedora_release
-        self.no_ssl_verify = no_ssl_verify
         self.name_resolver = name_resolver
         self.koji_server = koji_server
         self.packages_url = packages_url.rstrip("/")
@@ -96,14 +94,7 @@ class SRPMFetcher:
 
     def _session(self) -> koji.ClientSession:
         """A fresh anonymous session: downloads run in parallel threads."""
-        opts: dict = {
-            "anon_retry": True,
-            "max_retries": 3,
-            "retry_interval": 2,
-            "timeout": HUB_TIMEOUT,
-        }
-        if self.no_ssl_verify:
-            opts["no_ssl_verify"] = True
+        opts = {"anon_retry": True, "max_retries": 3, "retry_interval": 2, "timeout": HUB_TIMEOUT}
         return koji.ClientSession(self.koji_server, opts=opts)
 
     def download_srpm(self, package_name: str, version: str | None = None) -> str:
@@ -226,7 +217,7 @@ class SRPMFetcher:
             raise VibeBuildError(f"Refusing to download over plain HTTP: {url}")
         out.seek(0)
         out.truncate()
-        with requests.get(url, stream=True, timeout=300, verify=not self.no_ssl_verify) as r:
+        with requests.get(url, stream=True, timeout=300) as r:
             r.raise_for_status()
             size = 0
             for chunk in r.iter_content(chunk_size=1 << 16):

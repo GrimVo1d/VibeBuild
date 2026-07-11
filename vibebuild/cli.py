@@ -146,7 +146,7 @@ Examples:
     koji_group.add_argument(
         "--no-ssl-verify",
         action="store_true",
-        help="Disable SSL certificate verification (insecure)",
+        help="Do not verify the Koji hub's certificate (insecure; not used for Fedora downloads)",
     )
 
     build_group = parser.add_argument_group("Build options")
@@ -301,7 +301,6 @@ def ensure_srpm_path(opts: argparse.Namespace, srpm_arg: str, release: str) -> s
     fetcher = SRPMFetcher(
         download_dir=opts.download_dir,
         fedora_release=release,
-        no_ssl_verify=opts.no_ssl_verify,
         name_resolver=name_resolver_for(opts),
     )
     path = fetcher.download_srpm(srpm_arg)
@@ -363,7 +362,6 @@ def cmd_download(opts: argparse.Namespace, package_name: str, release: str) -> i
         fetcher = SRPMFetcher(
             download_dir=opts.download_dir,
             fedora_release=release,
-            no_ssl_verify=opts.no_ssl_verify,
             name_resolver=name_resolver_for(opts),
         )
         srpm_path = fetcher.download_srpm(package_name)
