@@ -14,7 +14,7 @@ from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient, KojiSession, poll_interval, task_state_name
 from vibebuild.name_resolver import PackageNameResolver
 from vibebuild.resolver import DependencyResolver
-from vibebuild.spec_patcher import cleanup_patched, patch_srpm
+from vibebuild.spec_patcher import check_can_patch, cleanup_patched, patch_srpm
 from vibebuild.toolchain import detect_toolchains
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ class KojiBuilder:
         nowait: bool = False,
         build_all_deps: bool = False,
         patch_specs: bool = False,
+        allow_unsandboxed: bool = False,
         name_resolver: PackageNameResolver | None = None,
         download_dir: str | None = None,
         fedora_release: str = "rawhide",
@@ -100,6 +101,7 @@ class KojiBuilder:
         self.scratch = scratch
         self.nowait = nowait
         self.patch_specs = patch_specs  # strip %check / allow unpackaged files via local rpmbuild
+        self.allow_unsandboxed = allow_unsandboxed  # patch without bwrap where it cannot sandbox
 
         self.koji_client = KojiClient(
             server=koji_server, serverca=serverca, no_ssl_verify=no_ssl_verify
@@ -145,7 +147,11 @@ class KojiBuilder:
         patched: str | None = None
         if self.patch_specs:
             try:
-                patched = patch_srpm(str(srpm), add_unpackaged_macro=add_unpackaged_macro)
+                patched = patch_srpm(
+                    str(srpm),
+                    add_unpackaged_macro=add_unpackaged_macro,
+                    allow_unsandboxed=self.allow_unsandboxed,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "spec patching skipped for %s: %s — using original SRPM", srpm.name, exc
@@ -364,6 +370,8 @@ class KojiBuilder:
         """
         if not Path(srpm_path).exists():
             raise SRPMNotFoundError(f"SRPM not found: {srpm_path}")
+        if self.patch_specs:
+            check_can_patch(self.allow_unsandboxed)
         logger.info("Starting vibebuild for: %s", srpm_path)
         with self.hub:
             return self._build_with_deps(str(srpm_path), resolve_deps)

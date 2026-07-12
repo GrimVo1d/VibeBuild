@@ -16,7 +16,7 @@ A command-line tool that builds an RPM package in Koji together with the build d
 
 - Python 3.12 or newer, Linux.
 - `rpm` to read SRPM headers, and the Koji Python library (`python3-koji` on Fedora).
-- `rpmbuild` for `--patch-specs`; `bwrap` (bubblewrap) to sandbox it.
+- `rpmbuild` and `bwrap` (bubblewrap) for `--patch-specs`; Python 3.12.11+ or 3.13.4+ there, older releases have `tarfile` filter bypasses.
 - A Koji hub you can build on, with a client certificate. Fedora Koji is used anonymously, to download SRPMs.
 
 ## Installation
@@ -81,7 +81,8 @@ Other options:
 | Option | Effect |
 | --- | --- |
 | `--build-all-deps` | Build every dependency locally, even if the tag's external repos provide it. On a real package the graph quickly reaches the toolchain and grows to hundreds of packages. |
-| `--patch-specs` | Rebuild each SRPM with `%check` removed before submitting it, and retry once a build that fails on unpackaged files. Off by default: rebuilding runs `rpmbuild -bs`, which executes the spec's macros. It runs under bubblewrap when available. |
+| `--patch-specs` | Rebuild each SRPM with `%check` removed before submitting it, and retry once a build that fails on unpackaged files. Off by default: rebuilding runs `rpmbuild -bs`, which executes the spec's macros. It runs under bubblewrap; if bwrap cannot sandbox it, the build stops before anything is submitted. |
+| `--allow-unsandboxed` | With `--patch-specs`, run `rpmbuild` without a sandbox, as the current user, where bwrap is missing or cannot create namespaces. |
 | `--nowait` | Submit the target build and do not wait for it. |
 | `--no-name-resolution` | Use BuildRequires as they are. |
 | `--no-ml`, `--ml-model PATH` | Rules only, or a different ML model. |

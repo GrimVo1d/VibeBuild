@@ -15,8 +15,9 @@ Both mechanisms are standard RPM/Fedora: the macro is documented in upstream
 `/usr/lib/rpm/macros`, `%check` is an ordinary optional spec section.
 
 Patching is opt-in (`--patch-specs`): rebuilding an SRPM runs `rpmbuild -bs`,
-which executes shell and Lua macros of the spec. It runs under bubblewrap when
-available. Without the option SRPMs go to Koji untouched.
+which executes shell and Lua macros of the spec. It runs under bubblewrap; where
+bwrap cannot sandbox it, patching refuses unless `--allow-unsandboxed` is given.
+Without the option SRPMs go to Koji untouched.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import functools
 import logging
 import shutil
 import subprocess  # nosec B404
+import sys
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -38,6 +40,9 @@ UNPACKAGED_MACRO = "%define _unpackaged_files_terminate_build 0"
 
 # Sources in an SRPM are mostly compressed already: the payload is about the SRPM size
 MAX_PAYLOAD_BYTES = 8 * 1024**3
+
+# tarfile's "data" filter can be bypassed before these releases (CVE-2025-4517 and others)
+_SAFE_TARFILE: dict[tuple[int, ...], tuple[int, ...]] = {(3, 12): (3, 12, 11), (3, 13): (3, 13, 4)}
 
 # Names of RPM sections. After `%check` parsing resumes when any
 # of them appears at the start of a line.
@@ -134,6 +139,7 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
     device files, so a crafted SRPM cannot write outside dest; the payload may
     unpack to at most MAX_PAYLOAD_BYTES.
     """
+    _check_tarfile_filter()
     with srpm.open("rb") as src:
         # List argv without a shell; rpm2archive is looked up in PATH
         proc = subprocess.Popen(  # nosec B603 B607
@@ -161,24 +167,31 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
         )
 
 
+def _check_tarfile_filter(version: tuple[int, ...] = sys.version_info[:3]) -> None:
+    """Refuse to extract on a Python whose tarfile "data" filter has known bypasses."""
+    fixed = _SAFE_TARFILE.get(version[:2])
+    if fixed and version < fixed:
+        raise VibeBuildError(
+            f"Python {'.'.join(map(str, version))} has tarfile filter bypasses "
+            f"(CVE-2025-4517); --patch-specs needs Python {'.'.join(map(str, fixed))} or later"
+        )
+
+
 def _rpm_path(path: Path) -> str:
     """A path as an rpm macro value: `%` would start a macro."""
     return str(path).replace("%", "%%")
 
 
 @functools.cache
-def _bwrap() -> str | None:
-    """Path to a working bwrap, or None (not installed, or no user namespaces)."""
+def _bwrap() -> tuple[str | None, str]:
+    """Path to a working bwrap and "", or None and why there is none."""
     bwrap = shutil.which("bwrap")
     if not bwrap:
-        logger.warning(
-            "bwrap not found: rpmbuild parses the spec without a sandbox, as the current user"
-        )
-        return None
+        return None, "bwrap not found"
     try:
         # List argv without a shell; bwrap is the absolute path from shutil.which
         probe = subprocess.run(  # nosec B603
-            [bwrap, "--unshare-all", "--ro-bind", "/", "/", "true"],
+            [bwrap, "--unshare-all", "--cap-drop", "ALL", "--ro-bind", "/", "/", "true"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -186,23 +199,46 @@ def _bwrap() -> str | None:
     except (OSError, subprocess.TimeoutExpired) as e:
         probe = subprocess.CompletedProcess([], 1, "", str(e))
     if probe.returncode != 0:
-        logger.warning(
-            "bwrap cannot create a sandbox here (%s): rpmbuild parses the spec without one",
-            probe.stderr.strip().splitlines()[0] if probe.stderr.strip() else probe.returncode,
+        reason = probe.stderr.strip().splitlines()[0] if probe.stderr.strip() else probe.returncode
+        return None, f"bwrap cannot create a sandbox here ({reason})"
+    return bwrap, ""
+
+
+def _require_sandbox() -> None:
+    """Raise VibeBuildError unless bwrap can sandbox rpmbuild here."""
+    bwrap, problem = _bwrap()
+    if not bwrap:
+        raise VibeBuildError(
+            f"{problem}: --patch-specs runs the spec's macros and needs a sandbox "
+            "(--allow-unsandboxed runs them without one)"
         )
-        return None
-    return bwrap
 
 
-def _sandboxed(cmd: list[str], work_dir: Path) -> list[str]:
-    """Wrap cmd in bubblewrap: no network, no $HOME, only work_dir writable.
+def check_can_patch(allow_unsandboxed: bool = False) -> None:
+    """Raise VibeBuildError if patch_srpm would refuse to run here; checked before a build."""
+    _check_tarfile_filter()
+    if not allow_unsandboxed:
+        _require_sandbox()
+
+
+@functools.cache
+def _warn_unsandboxed(problem: str) -> None:
+    logger.warning("%s: rpmbuild parses the spec without a sandbox, as the current user", problem)
+
+
+def _sandboxed(cmd: list[str], work_dir: Path, allow_unsandboxed: bool = False) -> list[str]:
+    """Wrap cmd in bubblewrap: no network, no $HOME, no capabilities, only work_dir writable.
 
     rpmbuild expands `%(...)` and `%{lua:...}` from the spec while parsing it, so
     a spec runs code. Where bwrap is missing or cannot create namespaces (e.g. an
-    unprivileged container), the command runs as is, with a warning.
+    unprivileged container), raises VibeBuildError, or with allow_unsandboxed
+    runs the command as is, with a warning.
     """
-    bwrap = _bwrap()
+    bwrap, problem = _bwrap()
     if not bwrap:
+        if not allow_unsandboxed:
+            _require_sandbox()
+        _warn_unsandboxed(problem)
         return cmd
     # A fresh tmpfs inside the sandbox, not the host /tmp
     sandbox_tmp = "/tmp"  # nosec B108
@@ -211,6 +247,10 @@ def _sandboxed(cmd: list[str], work_dir: Path) -> list[str]:
         "--unshare-all",
         "--die-with-parent",
         "--new-session",
+        "--cap-drop", "ALL",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/usr/sbin",
+        "--setenv", "LANG", "C.UTF-8",
         "--ro-bind", "/usr", "/usr",
         "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/sbin", "/sbin",
@@ -233,6 +273,7 @@ def patch_srpm(
     srpm_path: str,
     timeout: int = 600,
     add_unpackaged_macro: bool = False,
+    allow_unsandboxed: bool = False,
 ) -> str:
     """Unpack the SRPM, patch the spec, rebuild a new SRPM in a fresh temp directory.
 
@@ -243,7 +284,8 @@ def patch_srpm(
     and nothing is left behind.
 
     When `add_unpackaged_macro=True`, the start of the spec gets
-    `%define _unpackaged_files_terminate_build 0`.
+    `%define _unpackaged_files_terminate_build 0`. `allow_unsandboxed=True`
+    lets rpmbuild run without bwrap where it cannot sandbox.
     """
     srpm = Path(srpm_path).resolve()
     if not srpm.is_file():
@@ -251,7 +293,7 @@ def patch_srpm(
 
     target = Path(tempfile.mkdtemp(prefix="vibebuild-patch-"))
     try:
-        return _patch_into(srpm, target, timeout, add_unpackaged_macro)
+        return _patch_into(srpm, target, timeout, add_unpackaged_macro, allow_unsandboxed)
     except BaseException:
         shutil.rmtree(target, ignore_errors=True)
         raise
@@ -264,7 +306,9 @@ def cleanup_patched(patched_srpm: str) -> None:
         shutil.rmtree(parent, ignore_errors=True)
 
 
-def _patch_into(srpm: Path, target: Path, timeout: int, add_unpackaged_macro: bool) -> str:
+def _patch_into(
+    srpm: Path, target: Path, timeout: int, add_unpackaged_macro: bool, allow_unsandboxed: bool
+) -> str:
     sources_dir = target / "SOURCES"
     specs_dir = target / "SPECS"
     sources_dir.mkdir()
@@ -301,9 +345,12 @@ def _patch_into(srpm: Path, target: Path, timeout: int, add_unpackaged_macro: bo
         str(spec_dst),
     ]
     try:
-        # List argv without a shell; the spec is parsed inside bwrap when available
+        # List argv without a shell; the spec is parsed inside bwrap
         result = subprocess.run(  # nosec B603
-            _sandboxed(cmd, target), capture_output=True, text=True, timeout=timeout
+            _sandboxed(cmd, target, allow_unsandboxed),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise VibeBuildError(f"rpmbuild -bs timed out for {srpm.name}") from exc

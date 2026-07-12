@@ -170,7 +170,12 @@ Examples:
         "--patch-specs",
         action="store_true",
         help="Rebuild SRPMs locally without %%check, and retry builds failing on unpackaged "
-        "files; runs rpmbuild on the spec (sandboxed with bwrap when available)",
+        "files; runs rpmbuild on the spec, sandboxed with bwrap",
+    )
+    build_group.add_argument(
+        "--allow-unsandboxed",
+        action="store_true",
+        help="With --patch-specs, run rpmbuild without a sandbox where bwrap cannot create one",
     )
     build_group.add_argument(
         "--download-dir",
@@ -399,6 +404,7 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
         nowait=opts.nowait,
         build_all_deps=opts.build_all_deps,
         patch_specs=opts.patch_specs,
+        allow_unsandboxed=opts.allow_unsandboxed,
         name_resolver=name_resolver_for(opts),
         download_dir=opts.download_dir,
         fedora_release=release,

@@ -19,9 +19,11 @@ from vibebuild import spec_patcher
 from vibebuild.exceptions import VibeBuildError
 from vibebuild.spec_patcher import (
     UNPACKAGED_MACRO,
+    _check_tarfile_filter,
     _extract_srpm,
     _rpm_path,
     _sandboxed,
+    check_can_patch,
     cleanup_patched,
     patch_spec_text,
     patch_srpm,
@@ -285,6 +287,10 @@ class TestSandboxed:
 
         assert cmd[0] == "/usr/bin/bwrap"
         assert "--unshare-all" in cmd
+        assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
+        assert cmd.index("--clearenv") < cmd.index("--setenv")
+        i = cmd.index("PATH")
+        assert cmd[i - 1 : i + 2] == ["--setenv", "PATH", "/usr/bin:/usr/sbin"]
         assert cmd[-3:] == ["rpmbuild", "-bs", "x.spec"]
         i = cmd.index("--bind")
         assert cmd[i + 1 : i + 3] == [str(tmp_path), str(tmp_path)]
@@ -295,22 +301,52 @@ class TestSandboxed:
 
         assert probe.call_count == 1
 
-    def test_without_bwrap_runs_as_is_with_warning(self, tmp_path, caplog):
+    def test_without_bwrap_refuses(self, tmp_path):
         with patch("vibebuild.spec_patcher.shutil.which", return_value=None):
-            cmd = _sandboxed(["rpmbuild"], tmp_path)
+            with pytest.raises(VibeBuildError, match="bwrap not found.*--allow-unsandboxed"):
+                _sandboxed(["rpmbuild"], tmp_path)
+
+    def test_without_bwrap_allowed_runs_as_is_with_warning(self, tmp_path, caplog):
+        with patch("vibebuild.spec_patcher.shutil.which", return_value=None):
+            cmd = _sandboxed(["rpmbuild"], tmp_path, allow_unsandboxed=True)
 
         assert cmd == ["rpmbuild"]
         assert "bwrap not found" in caplog.text
 
-    def test_bwrap_without_namespaces_runs_as_is_with_warning(self, tmp_path, probe, caplog):
+    def test_bwrap_without_namespaces_refuses(self, tmp_path, probe):
         probe.return_value = subprocess.CompletedProcess(
             [], 1, "", "bwrap: No permissions to create a new namespace\n"
         )
 
-        cmd = _sandboxed(["rpmbuild"], tmp_path)
+        with pytest.raises(VibeBuildError, match="No permissions to create a new namespace"):
+            _sandboxed(["rpmbuild"], tmp_path)
 
-        assert cmd == ["rpmbuild"]
-        assert "No permissions to create a new namespace" in caplog.text
+    def test_check_can_patch(self, probe):
+        check_can_patch()
+
+        probe.return_value = subprocess.CompletedProcess([], 1, "", "no userns\n")
+        spec_patcher._bwrap.cache_clear()
+        with pytest.raises(VibeBuildError, match="no userns"):
+            check_can_patch()
+        check_can_patch(allow_unsandboxed=True)
+
+
+@pytest.mark.parametrize(
+    ("version", "refused"),
+    [
+        ((3, 12, 10), True),
+        ((3, 12, 11), False),
+        ((3, 13, 3), True),
+        ((3, 13, 4), False),
+        ((3, 14, 0), False),
+    ],
+)
+def test_tarfile_filter_version_guard(version, refused):
+    if refused:
+        with pytest.raises(VibeBuildError, match="CVE-2025-4517"):
+            _check_tarfile_filter(version)
+    else:
+        _check_tarfile_filter(version)
 
 
 class TestPatchSrpm:
@@ -336,7 +372,7 @@ class TestPatchSrpm:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         with (
-            patch("vibebuild.spec_patcher._bwrap", return_value=None),
+            patch("vibebuild.spec_patcher._bwrap", return_value=("/usr/bin/bwrap", "")),
             patch("vibebuild.spec_patcher.subprocess.run", side_effect=fake) as mock,
         ):
             yield mock

@@ -12,7 +12,7 @@ from vibebuild.builder import (
     BuildTask,
     KojiBuilder,
 )
-from vibebuild.exceptions import KojiBuildError, SRPMNotFoundError
+from vibebuild.exceptions import KojiBuildError, SRPMNotFoundError, VibeBuildError
 from vibebuild.resolver import DependencyNode
 
 
@@ -331,7 +331,9 @@ class TestSpecPatchingOptIn:
                 str(srpm), add_unpackaged_macro=True
             )
 
-        mock_patch.assert_called_once_with(str(srpm), add_unpackaged_macro=True)
+        mock_patch.assert_called_once_with(
+            str(srpm), add_unpackaged_macro=True, allow_unsandboxed=False
+        )
         assert mock_koji_session.uploadWrapper.call_args.args[0] == str(patched)
         mock_cleanup.assert_called_once_with(str(patched))
         assert task.srpm_path == str(srpm)
@@ -356,6 +358,22 @@ class TestSpecPatchingOptIn:
 
         assert mock_koji_session.uploadWrapper.call_args.args[0] == str(srpm)
         mock_cleanup.assert_not_called()
+
+    def test_build_refuses_up_front_without_a_sandbox(self, srpm, mock_koji_session):
+        with patch(
+            "vibebuild.builder.check_can_patch", side_effect=VibeBuildError("bwrap not found")
+        ) as check:
+            with pytest.raises(VibeBuildError, match="bwrap not found"):
+                make_builder(patch_specs=True).build_with_deps(str(srpm))
+
+        check.assert_called_once_with(False)
+        mock_koji_session.build.assert_not_called()
+
+    def test_allow_unsandboxed_is_passed_on(self, srpm, mock_koji_session):
+        with patch("vibebuild.builder.patch_srpm", side_effect=VibeBuildError("x")) as mock_patch:
+            make_builder(patch_specs=True, allow_unsandboxed=True)._submit_build(str(srpm))
+
+        assert mock_patch.call_args.kwargs["allow_unsandboxed"] is True
 
 
 class TestPollBuilds:
