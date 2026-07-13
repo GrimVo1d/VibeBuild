@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 METALINK_URL = "https://mirrors.fedoraproject.org/metalink"
 MAX_PRIMARY_BYTES = 512 * 1024 * 1024
+MAX_METADATA_BYTES = 16 * 1024 * 1024  # metalink and repomd.xml are tens of kilobytes
 MAX_MIRRORS = 5
 
 METALINK_NS = "{http://www.metalinker.org/}"
@@ -56,19 +57,33 @@ _PROVIDE_PREFIXES = (
     "texlive-",
 )
 
+
+def _https_only(resp: requests.Response, *args, **kwargs) -> None:
+    """Response hook, run for every redirect hop too: never follow a redirect off https."""
+    if not resp.url.startswith("https://"):
+        raise VibeBuildError(f"Refusing a redirect to plain HTTP: {resp.url}")
+
+
 _session = requests.Session()
 _session.headers["User-Agent"] = f"vibebuild/{__version__}"
+_session.hooks["response"].append(_https_only)
 
 
 def _get(url: str, timeout: int = 60) -> bytes:
+    """The body of url, at most MAX_METADATA_BYTES."""
     if not url.startswith("https://"):
         raise VibeBuildError(f"Refusing to download over plain HTTP: {url}")
+    content = bytearray()
     try:
-        resp = _session.get(url, timeout=timeout)
-        resp.raise_for_status()
+        with _session.get(url, stream=True, timeout=timeout) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_content(1 << 16):
+                content += chunk
+                if len(content) > MAX_METADATA_BYTES:
+                    raise VibeBuildError(f"{url} is larger than {MAX_METADATA_BYTES} bytes")
     except requests.RequestException as exc:
         raise VibeBuildError(f"Cannot fetch {url}: {exc}") from exc
-    return resp.content
+    return bytes(content)
 
 
 def repomd_mirrors(release: str, arch: str) -> tuple[str, list[str]]:

@@ -196,6 +196,31 @@ class TestMirrors:
         with pytest.raises(VibeBuildError, match="Cannot fetch"):
             training._get("https://example.internal/x")
 
+    def test_get_size_limit(self, mocker):
+        resp = mocker.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.iter_content.return_value = [b"x" * 10, b"x" * 10]
+        mocker.patch.object(training._session, "get", return_value=resp)
+        mocker.patch("vibebuild.training.MAX_METADATA_BYTES", 15)
+
+        with pytest.raises(VibeBuildError, match="larger than 15 bytes"):
+            training._get("https://example.internal/x")
+
+    def test_get_returns_the_body(self, mocker):
+        resp = mocker.MagicMock()
+        resp.__enter__.return_value = resp
+        resp.iter_content.return_value = [b"ab", b"cd"]
+        mocker.patch.object(training._session, "get", return_value=resp)
+
+        assert training._get("https://example.internal/x") == b"abcd"
+
+    def test_redirects_off_https_are_refused(self, mocker):
+        assert training._https_only in training._session.hooks["response"]
+        training._https_only(mocker.Mock(url="https://mirror/x"))
+
+        with pytest.raises(VibeBuildError, match="redirect to plain HTTP"):
+            training._https_only(mocker.Mock(url="http://mirror/x"))
+
 
 class TestPrimary:
     def test_primary_location(self):
