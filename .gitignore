@@ -51,6 +51,12 @@ Thumbs.db
 /logs/
 *.src.rpm
 *.rpm
+*.npz
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
 
 # Script outputs
 prod_validation_report.json
