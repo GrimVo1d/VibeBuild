@@ -22,7 +22,7 @@ from pathlib import Path
 from vibebuild import __version__
 from vibebuild.analyzer import get_package_info_from_srpm
 from vibebuild.builder import BuildResult, BuildStatus, KojiBuilder
-from vibebuild.exceptions import VibeBuildError
+from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient
 from vibebuild.ml_resolver import default_model_path
@@ -302,6 +302,9 @@ def ensure_srpm_path(opts: argparse.Namespace, srpm_arg: str, release: str) -> s
     p = Path(srpm_arg)
     if p.exists():
         return str(p.resolve())
+    if "/" in srpm_arg or srpm_arg.endswith(".rpm"):
+        # A path, not a package name: do not ask Fedora for a package called "x.src.rpm"
+        raise SRPMNotFoundError(f"SRPM not found: {srpm_arg}")
     logging.info("Downloading SRPM for: %s", srpm_arg)
     fetcher = SRPMFetcher(
         download_dir=opts.download_dir,

@@ -23,7 +23,7 @@ from vibebuild.cli import (
     print_build_result,
     setup_logging,
 )
-from vibebuild.exceptions import VibeBuildError
+from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
 
 NO_KOJI_CONFIG = {
     "server": None,
@@ -503,6 +503,14 @@ class TestEnsureSrpmPath:
 
         assert result == "/path/to/downloaded.src.rpm"
         assert mock_fetcher.call_args.kwargs["fedora_release"] == "44"
+
+    @pytest.mark.parametrize("arg", ["./missing.src.rpm", "missing-1.0-1.src.rpm", "/no/such"])
+    def test_missing_path_is_not_downloaded(self, arg):
+        with patch("vibebuild.cli.SRPMFetcher") as mock_fetcher:
+            with pytest.raises(SRPMNotFoundError, match="SRPM not found"):
+                ensure_srpm_path(make_opts(), arg, "44")
+
+        mock_fetcher.assert_not_called()
 
 
 class TestMain:
