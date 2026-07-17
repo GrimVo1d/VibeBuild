@@ -268,6 +268,16 @@ class KojiSession:
             return None
         return task_state_name(info.get("state") if info else None)
 
+    def task_error(self, task_id: int) -> str | None:
+        """Why a failed task failed, as Koji reports it; None if the hub could not tell."""
+        try:
+            self.session.getTaskResult(task_id)
+        except koji.GenericError as exc:
+            return str(exc).strip() or None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("getTaskResult(%s) failed: %s", task_id, exc)
+        return None
+
     def subtasks(self, task_id: int) -> list[dict]:
         """Child tasks of a task; empty if the hub could not be asked."""
         try:

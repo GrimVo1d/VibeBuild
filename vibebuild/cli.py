@@ -255,6 +255,11 @@ def print_build_result(result: BuildResult) -> None:
         for pkg in result.failed_packages:
             print(f"  ✗ {pkg}")
 
+    if result.skipped_packages:
+        print("\nNot built, a dependency failed:")
+        for pkg in result.skipped_packages:
+            print(f"  - {pkg}")
+
     if result.tasks:
         print("\nBuild tasks:")
         icons = {
@@ -270,7 +275,7 @@ def print_build_result(result: BuildResult) -> None:
             if task.task_id:
                 print(f"      Task ID: {task.task_id}")
             if task.error_message:
-                print(f"      Error: {task.error_message[:100]}")
+                print(f"      Error: {task.error_message[:300]}")
 
     print("=" * 60)
 

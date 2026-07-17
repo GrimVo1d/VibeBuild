@@ -38,6 +38,14 @@ _FINAL_STATUS = {
     "canceled": BuildStatus.CANCELED,
 }
 
+# A waiting build logs a progress line when its state changes, and at least this often (s)
+PROGRESS_EVERY = 300
+
+
+def _elapsed(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s"
+
 
 @dataclass
 class BuildTask:
@@ -64,6 +72,7 @@ class BuildResult:
     toolchains: list[str] = field(default_factory=list)
     tagged_target: str | None = None
     tagged_deps: list[str] = field(default_factory=list)
+    skipped_packages: list[str] = field(default_factory=list)  # not built: a dependency failed
 
 
 class KojiBuilder:
@@ -102,6 +111,7 @@ class KojiBuilder:
         self.nowait = nowait
         self.patch_specs = patch_specs  # strip %check / allow unpackaged files via local rpmbuild
         self.allow_unsandboxed = allow_unsandboxed  # patch without bwrap where it cannot sandbox
+        self._repo_checked = False  # repo freshness checked in this run
 
         self.koji_client = KojiClient(
             server=koji_server, serverca=serverca, no_ssl_verify=no_ssl_verify
@@ -225,15 +235,23 @@ class KojiBuilder:
             if not task.task_id or not wait or self.nowait:
                 return task
 
-            task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
+            self._wait_for(task)
             if task.status != BuildStatus.FAILED or not self._can_retry_unpackaged(task):
                 return task
 
             logger.info("  retrying %s with _unpackaged_files_terminate_build 0", task.package_name)
             retry = self._submit_build(srpm_path, add_unpackaged_macro=True, scratch=self.scratch)
             if retry.task_id:
-                retry.status = self._poll_build(retry.task_id, retry.nvr or retry.package_name)
+                self._wait_for(retry)
             return retry
+
+    def _wait_for(self, task: BuildTask) -> None:
+        """Poll a submitted task to the end, keeping Koji's reason if it failed."""
+        if task.task_id is None:
+            return
+        task.status = self._poll_build(task.task_id, task.nvr or task.package_name)
+        if task.status == BuildStatus.FAILED:
+            task.error_message = self.hub.task_error(task.task_id) or f"Task {task.task_id} failed"
 
     # rpmbuild's error about files the spec does not package, from build.log of
     # the buildArch subtask. Errors are at the end, so only the tail is read.
@@ -256,9 +274,13 @@ class KojiBuilder:
     def _poll_build(
         self, task_id: int, nvr: str, timeout: int = 7200, interval: int = 30
     ) -> BuildStatus:
-        """Wait for one build task, logging its progress (subtasks and their states)."""
+        """Wait for one build task, logging its progress (subtasks and their states).
+
+        A line is logged when the progress changes, and at least every PROGRESS_EVERY seconds.
+        """
         start = time.time()
         last_progress = ""
+        last_logged = 0.0
 
         while time.time() - start < timeout:
             elapsed = time.time() - start
@@ -272,11 +294,10 @@ class KojiBuilder:
                 f"{sub.get('method', '?')} [{task_state_name(sub.get('state'))}]"
                 for sub in self.hub.subtasks(task_id)[:3]
             ]
-            minutes, seconds = divmod(int(elapsed), 60)
-            progress = f"  [{nvr}] {minutes}m{seconds:02d}s — {', '.join(subtasks) or state}"
-            if progress != last_progress:
-                logger.info(progress)
-                last_progress = progress
+            progress = ", ".join(subtasks) or state
+            if progress != last_progress or elapsed - last_logged >= PROGRESS_EVERY:
+                logger.info("  [%s] %s — %s", nvr, _elapsed(elapsed), progress)
+                last_progress, last_logged = progress, elapsed
 
             status = _FINAL_STATUS.get(state)
             if status == BuildStatus.FAILED:
@@ -289,9 +310,14 @@ class KojiBuilder:
         return BuildStatus.FAILED
 
     def _poll_builds(self, tasks: list[BuildTask], timeout: int = 7200, interval: int = 30) -> None:
-        """Wait for several build tasks at once, setting their statuses."""
+        """Wait for several build tasks at once, setting their statuses.
+
+        Logs what is still pending when that changes, and at least every PROGRESS_EVERY seconds.
+        """
         pending = {t.task_id: t for t in tasks if t.task_id}
         start = time.time()
+        last_names = ""
+        last_logged = 0.0
 
         while pending and time.time() - start < timeout:
             for task_id, task in list(pending.items()):
@@ -300,14 +326,18 @@ class KojiBuilder:
                     continue
                 task.status = status
                 if status == BuildStatus.FAILED:
-                    task.error_message = f"Build task {task_id} failed"
+                    logger.error("  [%s] Build FAILED (task %s)", task.package_name, task_id)
+                    task.error_message = (
+                        self.hub.task_error(task_id) or f"Build task {task_id} failed"
+                    )
                 del pending[task_id]
 
             if pending:
                 elapsed = time.time() - start
-                minutes, seconds = divmod(int(elapsed), 60)
                 names = ", ".join(t.package_name for t in pending.values())
-                logger.info("  [%sm%02ds] Waiting for: %s", minutes, seconds, names)
+                if names != last_names or elapsed - last_logged >= PROGRESS_EVERY:
+                    logger.info("  [%s] Waiting for: %s", _elapsed(elapsed), names)
+                    last_names, last_logged = names, elapsed
                 time.sleep(poll_interval(elapsed, interval))
 
         for task in pending.values():
@@ -315,12 +345,20 @@ class KojiBuilder:
             task.error_message = f"Build timed out after {timeout}s"
             logger.error("  [%s] Build timed out after %ss", task.package_name, timeout)
 
-    def _ensure_repo_ready(self) -> None:
-        """Regenerate the build tag repo unless it is already current."""
-        if self.hub.repo_is_current(self.build_tag):
-            logger.info("Repo for %s is current", self.build_tag)
-            return
-        self.wait_for_repo()
+    def _prepare_repo(self, stale: bool) -> None:
+        """Make the build tag repo usable before submitting builds.
+
+        stale: this run tagged something since the repo was last regenerated. The
+        first time in a run, a repo that is not current is regenerated as well.
+        """
+        if stale:
+            self.wait_for_repo()
+        elif not self._repo_checked:
+            if self.hub.repo_is_current(self.build_tag):
+                logger.info("Repo for %s is current", self.build_tag)
+            else:
+                self.wait_for_repo()
+        self._repo_checked = True
 
     def wait_for_repo(self, timeout: int = 1800) -> bool:
         """Regenerate the build tag repo and wait for it. True if it is ready."""
@@ -381,18 +419,32 @@ class KojiBuilder:
         result = BuildResult(success=True)
         package_info = get_package_info_from_srpm(srpm_path)
         logger.info("Package: %s", package_info.nvr)
+        self._repo_checked = False
 
         # Set when something was tagged since the last newRepo: the next level (or
         # the target) needs a fresh repo to see it.
         repo_stale = False
         if resolve_deps:
-            self._ensure_repo_ready()
             logger.info("Analyzing dependencies...")
             repo_stale = self._build_levels(self.resolve_build_chain(srpm_path), result)
-        if repo_stale:
-            self.wait_for_repo()
 
-        if result.success:
+        if not result.success:
+            logger.error("Not building %s: a dependency failed", package_info.nvr)
+            result.skipped_packages.append(package_info.name)
+        elif not self.scratch and self._already_built(package_info.name, package_info.nvr):
+            self._record(
+                result,
+                BuildTask(
+                    package_name=package_info.name,
+                    srpm_path=srpm_path,
+                    target=self.target,
+                    nvr=package_info.nvr,
+                    status=BuildStatus.ALREADY_BUILT,
+                ),
+            )
+        else:
+            if resolve_deps:
+                self._prepare_repo(repo_stale)
             logger.info("Building target package: %s", package_info.nvr)
             try:
                 self._record(result, self.build_package(srpm_path, wait=True))
@@ -428,19 +480,23 @@ class KojiBuilder:
 
         repo_stale = False
         for level_idx, level in enumerate(build_chain):
-            if repo_stale:
-                self.wait_for_repo()
-                repo_stale = False
             logger.info("Building level %d/%d: %s", level_idx + 1, len(build_chain), level)
-
-            level_tasks = []
+            srpms = {}
             for pkg_name in level:
                 node = self.resolver.dependency_graph.get(pkg_name)
                 if not node or not node.srpm_path:
                     logger.warning("Skipping %s: no SRPM available", pkg_name)
                     continue
+                srpms[pkg_name] = node.srpm_path
+            if not srpms:
+                continue
+            self._prepare_repo(repo_stale)
+            repo_stale = False
+
+            level_tasks = []
+            for pkg_name, srpm in srpms.items():
                 try:
-                    task = self._submit_build(node.srpm_path)
+                    task = self._submit_build(srpm)
                 except Exception as e:  # noqa: BLE001
                     logger.error("Failed to submit %s: %s", pkg_name, e)
                     result.failed_packages.append(pkg_name)

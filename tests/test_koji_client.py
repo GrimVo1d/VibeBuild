@@ -311,6 +311,22 @@ class TestTasks:
 
         assert hub_session.task_state(1) is None
 
+    def test_task_error_is_the_tasks_fault(self, hub_session, mock_koji_session):
+        mock_koji_session.getTaskResult.side_effect = koji.GenericError(
+            "mock exited with status 30"
+        )
+
+        assert hub_session.task_error(1) == "mock exited with status 30"
+
+    @pytest.mark.parametrize("outcome", [{"ok": 1}, OSError("timeout")])
+    def test_task_error_unknown(self, hub_session, mock_koji_session, outcome):
+        if isinstance(outcome, Exception):
+            mock_koji_session.getTaskResult.side_effect = outcome
+        else:
+            mock_koji_session.getTaskResult.return_value = outcome
+
+        assert hub_session.task_error(1) is None
+
     def test_subtasks(self, hub_session, mock_koji_session):
         mock_koji_session.listTasks.return_value = [{"id": 2}]
 

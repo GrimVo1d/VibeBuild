@@ -225,6 +225,14 @@ class TestPrintBuildResult:
         assert "FAILED" in out
         assert "pkg2" in out
 
+    def test_prints_skipped_target(self, capsys):
+        print_build_result(
+            BuildResult(success=False, failed_packages=["dep"], skipped_packages=["main"])
+        )
+
+        out = capsys.readouterr().out
+        assert "Not built, a dependency failed:\n  - main" in out
+
     def test_prints_tasks(self, capsys):
         tasks = [
             BuildTask("built", "/p", "t", task_id=12345, status=BuildStatus.COMPLETE),

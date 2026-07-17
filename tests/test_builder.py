@@ -851,37 +851,6 @@ class TestBuildPackageAddPkg:
                 builder.build_package(str(srpm), wait=False)
 
 
-class TestBuildWithDepsEnsureRepoReady:
-    def test_ensure_repo_ready_called_at_start(self, tmp_path, mock_subprocess_run):
-        """build_with_deps should call _ensure_repo_ready at the start."""
-        srpm = tmp_path / "test.src.rpm"
-        srpm.write_text("fake srpm")
-        mock_subprocess_run.return_value.returncode = 0
-        mock_subprocess_run.return_value.stdout = "Created task: 12345"
-        builder = make_builder()
-
-        complete_task = BuildTask(
-            package_name="test",
-            srpm_path=str(srpm),
-            target="fedora-target",
-            task_id=12345,
-            status=BuildStatus.COMPLETE,
-        )
-
-        with patch("vibebuild.builder.get_package_info_from_srpm") as mock_info:
-            mock_info.return_value = PackageInfo(
-                name="test", version="1.0", release="1", build_requires=[], source_urls=[]
-            )
-            with patch.object(builder, "_ensure_repo_ready") as mock_ensure:
-                with patch.object(builder.resolver, "build_dependency_graph"):
-                    with patch.object(builder.resolver, "get_build_chain", return_value=[]):
-                        with patch.object(builder, "build_package", return_value=complete_task):
-                            builder.build_with_deps(str(srpm))
-
-            # Called once at the start of build_with_deps (no longer before final build)
-            assert mock_ensure.call_count == 1
-
-
 class TestUnpackagedFilesRetry:
     """Retry of a build with `_unpackaged_files_terminate_build 0` on the corresponding
     rpmbuild error. Applying the macro is optional, only on retry.
@@ -1043,22 +1012,41 @@ class TestUnpackagedFilesRetry:
         assert failed_task.status == BuildStatus.FAILED
 
 
-class TestRepoFreshness:
-    def test_ensure_repo_ready_skips_newrepo_when_current(self, mock_koji_session):
+class TestPrepareRepo:
+    def test_current_repo_is_kept(self, mock_koji_session):
         builder = make_builder()
 
         with patch.object(builder.hub, "repo_is_current", return_value=True):
-            builder._ensure_repo_ready()
+            builder._prepare_repo(stale=False)
 
         mock_koji_session.newRepo.assert_not_called()
 
-    def test_ensure_repo_ready_regenerates_stale_repo(self, mock_koji_session):
+    def test_outdated_repo_is_regenerated(self, mock_koji_session):
         builder = make_builder()
 
         with patch.object(builder.hub, "repo_is_current", return_value=False):
-            builder._ensure_repo_ready()
+            builder._prepare_repo(stale=False)
 
         mock_koji_session.newRepo.assert_called_once_with("fedora-build")
+
+    def test_freshness_is_checked_once_per_run(self, mock_koji_session):
+        builder = make_builder()
+
+        with patch.object(builder.hub, "repo_is_current", return_value=False) as current:
+            builder._prepare_repo(stale=False)
+            builder._prepare_repo(stale=False)
+
+        current.assert_called_once()
+        mock_koji_session.newRepo.assert_called_once()
+
+    def test_stale_repo_is_regenerated_without_asking(self, mock_koji_session):
+        builder = make_builder()
+
+        with patch.object(builder.hub, "repo_is_current") as current:
+            builder._prepare_repo(stale=True)
+
+        current.assert_not_called()
+        mock_koji_session.newRepo.assert_called_once()
 
 
 class TestRepoRegenerationBetweenLevels:
@@ -1093,7 +1081,8 @@ class TestRepoRegenerationBetweenLevels:
             with (
                 patch.object(builder.resolver, "build_dependency_graph"),
                 patch.object(builder.resolver, "get_build_chain", return_value=chain),
-                patch.object(builder, "_ensure_repo_ready"),
+                patch.object(builder.hub, "repo_is_current", return_value=True),
+                patch.object(builder, "_already_built", return_value=False),
                 patch.object(builder, "_submit_build", side_effect=submit),
                 patch.object(builder, "_poll_builds", side_effect=poll),
                 patch.object(builder, "_retry_unpackaged_failures"),
@@ -1111,6 +1100,9 @@ class TestRepoRegenerationBetweenLevels:
 
     def test_nothing_built_no_newrepo(self, tmp_path):
         assert self._run(tmp_path, [["dep"]], built=set()) == 0
+
+    def test_second_level_failing_skips_newrepo_before_target(self, tmp_path):
+        assert self._run(tmp_path, [["a"], ["b"]], built={"a"}) == 1
 
     def test_no_dependencies_no_newrepo(self, tmp_path):
         assert self._run(tmp_path, [], built=set()) == 0
@@ -1226,7 +1218,7 @@ class TestAlreadyBuilt:
         done = BuildTask("test-pkg", str(srpm), "t", status=BuildStatus.ALREADY_BUILT)
         with (
             patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info()),
-            patch.object(builder, "_ensure_repo_ready"),
+            patch.object(builder, "_prepare_repo"),
             patch.object(builder, "resolve_build_chain", return_value=[]),
             patch.object(builder, "build_package", return_value=done),
         ):
@@ -1235,6 +1227,24 @@ class TestAlreadyBuilt:
         assert result.success is True
         assert result.built_packages == ["test-pkg"]
 
+    def test_already_built_target_needs_no_repo(self, srpm, mock_koji_session):
+        builder = make_builder()
+        with (
+            patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info()),
+            patch.object(builder, "resolve_build_chain", return_value=[]),
+            patch.object(
+                builder.koji_client, "latest_build", return_value={"nvr": "test-pkg-1.0-1"}
+            ),
+            patch.object(builder, "_prepare_repo") as prepare,
+            patch.object(builder, "build_package") as build_target,
+        ):
+            result = builder.build_with_deps(str(srpm))
+
+        prepare.assert_not_called()
+        build_target.assert_not_called()
+        assert result.success is True
+        assert [t.status for t in result.tasks] == [BuildStatus.ALREADY_BUILT]
+
     def test_already_built_dependency_does_not_regenerate_repo(self, srpm):
         builder = make_builder()
         builder.resolver._dependency_graph = {"dep": DependencyNode("dep", srpm_path=str(srpm))}
@@ -1242,7 +1252,7 @@ class TestAlreadyBuilt:
         target = BuildTask("test-pkg", str(srpm), "t", status=BuildStatus.COMPLETE)
         with (
             patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info()),
-            patch.object(builder, "_ensure_repo_ready"),
+            patch.object(builder, "_prepare_repo"),
             patch.object(builder, "resolve_build_chain", return_value=[["dep"]]),
             patch.object(builder, "_submit_build", return_value=dep),
             patch.object(builder, "build_package", return_value=target),
@@ -1267,7 +1277,7 @@ class TestBuildWithDepsFlow:
         target = BuildTask("main", str(srpm), "t", task_id=1, status=BuildStatus.COMPLETE)
         with (
             patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info("main")),
-            patch.object(builder, "_ensure_repo_ready") as ensure,
+            patch.object(builder, "_prepare_repo") as ensure,
             patch.object(builder, "resolve_build_chain") as resolve,
             patch.object(builder, "build_package", return_value=target),
         ):
@@ -1294,7 +1304,7 @@ class TestBuildWithDepsFlow:
         builder.resolver._dependency_graph = {"dep": DependencyNode("dep", srpm_path=str(srpm))}
         with (
             patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info("main")),
-            patch.object(builder, "_ensure_repo_ready"),
+            patch.object(builder, "_prepare_repo"),
             patch.object(builder, "resolve_build_chain", return_value=[["dep"]]),
             patch.object(builder, "_submit_build", side_effect=KojiBuildError("denied")),
             patch.object(builder, "build_package") as build_target,
@@ -1323,7 +1333,7 @@ class TestBuildWithDepsFlow:
 
         with (
             patch("vibebuild.builder.get_package_info_from_srpm", return_value=_info("main")),
-            patch.object(builder, "_ensure_repo_ready"),
+            patch.object(builder, "_prepare_repo"),
             patch.object(builder, "resolve_build_chain", return_value=[["a"], ["b"]]),
             patch.object(builder, "_submit_build", side_effect=submit),
             patch.object(builder, "_poll_builds", side_effect=poll),
@@ -1336,6 +1346,7 @@ class TestBuildWithDepsFlow:
         assert submitted == ["a", "b"]
         assert result.failed_packages == ["a"]
         assert result.built_packages == ["b"]
+        assert result.skipped_packages == ["main"]
         build_target.assert_not_called()
 
     def test_session_is_opened_once_for_the_run(self, srpm, mock_koji_session):
@@ -1374,3 +1385,65 @@ class TestBuildWithDepsFlow:
 
         assert calls == ["/d/dep.src.rpm", None]
         dl.assert_called_once_with("dep")
+
+
+class TestFailureReasons:
+    def test_level_failure_keeps_kojis_reason(self, mock_koji_session):
+        builder = make_builder()
+        mock_koji_session.getTaskInfo.return_value = {"state": 5}  # failed
+        mock_koji_session.getTaskResult.side_effect = koji.GenericError(
+            "error building package (arch noarch), mock exited with status 30"
+        )
+        task = BuildTask("dep", "/d.src.rpm", "t", task_id=5, status=BuildStatus.BUILDING)
+
+        with builder.hub:
+            builder._poll_builds([task])
+
+        assert task.status == BuildStatus.FAILED
+        assert task.error_message == (
+            "error building package (arch noarch), mock exited with status 30"
+        )
+
+    def test_target_failure_keeps_kojis_reason(self, tmp_path, mock_koji_session):
+        builder = make_builder()
+        task = BuildTask("main", "/m.src.rpm", "t", task_id=9, status=BuildStatus.BUILDING)
+        with (
+            patch.object(builder, "_submit_build", return_value=task),
+            patch.object(builder, "_poll_build", return_value=BuildStatus.FAILED),
+            patch.object(builder, "_can_retry_unpackaged", return_value=False),
+            patch.object(builder.hub, "task_error", return_value="BuildError: boom"),
+        ):
+            result = builder.build_package("/m.src.rpm")
+
+        assert result.error_message == "BuildError: boom"
+
+    def test_unknown_reason_names_the_task(self, mock_koji_session):
+        builder = make_builder()
+        task = BuildTask("main", "/m.src.rpm", "t", task_id=9, status=BuildStatus.BUILDING)
+        with (
+            patch.object(builder, "_poll_build", return_value=BuildStatus.FAILED),
+            patch.object(builder.hub, "task_error", return_value=None),
+        ):
+            builder._wait_for(task)
+
+        assert task.error_message == "Task 9 failed"
+
+
+class TestProgressLogging:
+    def test_unchanged_progress_is_not_repeated(self, mock_koji_session, caplog, mocker):
+        caplog.set_level("INFO", logger="vibebuild.builder")
+        mocker.patch("vibebuild.builder.time.sleep")
+        clock = iter(range(0, 10_000, 10))
+        mocker.patch("vibebuild.builder.time.time", side_effect=lambda: next(clock))
+        states = ["open"] * 20 + ["closed"]  # about 400 s of polling
+        builder = make_builder()
+        with (
+            patch.object(builder.hub, "task_state", side_effect=states),
+            patch.object(builder.hub, "subtasks", return_value=[]),
+        ):
+            assert builder._poll_build(1, "pkg-1-1") == BuildStatus.COMPLETE
+
+        lines = [r.getMessage() for r in caplog.records if "[pkg-1-1]" in r.getMessage()]
+        # the first "open", a heartbeat after PROGRESS_EVERY, and "closed"
+        assert len(lines) == 3
+        assert lines[-1].endswith("closed")
