@@ -114,12 +114,14 @@ class SRPMFetcher:
             SRPMNotFoundError: If no candidate name has a build in Fedora Koji
         """
         if self.name_resolver:
-            names_to_try = self.name_resolver.get_download_candidates(package_name)
+            candidates = self.name_resolver.iter_download_candidates(package_name)
         else:
-            names_to_try = [package_name]
+            candidates = iter([package_name])
 
+        names_to_try: list[str] = []
         errors: list[str] = []
-        for name in names_to_try:
+        for name in candidates:
+            names_to_try.append(name)
             cache_key = f"{name}-{version or 'latest'}"
             cached = self._cache.get(cache_key)
             if cached and Path(cached).exists():

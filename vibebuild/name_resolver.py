@@ -7,7 +7,7 @@ perl(File::Path)) to real RPM package names, and maps RPM names to possible SRPM
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from vibebuild.ml_resolver import MLPackageResolver
@@ -36,8 +36,14 @@ SYSTEM_MACROS: dict[str, str] = {
 # Each entry is (compiled_regex, replacement_function).
 PROVIDE_PATTERNS: list[tuple[re.Pattern, Callable]] = [
     (
-        re.compile(r"^python(\d*)dist\((.+)\)$"),
+        # Extras (`requests[socks]`) come from the same SRPM as the package itself
+        re.compile(r"^python(\d*)dist\(([^\[\]()]+)(?:\[[^\]]*\])?\)$"),
         lambda m: f"python{m.group(1) or '3'}-{m.group(2)}",
+    ),
+    (
+        # Features (`crate(serde/derive)`) are subpackages of the crate's SRPM
+        re.compile(r"^crate\(([^/()]+)(?:/[^()]*)?\)$"),
+        lambda m: f"rust-{m.group(1)}-devel",
     ),
     (
         re.compile(r"^pkgconfig\((.+)\)$"),
@@ -353,6 +359,11 @@ SUBPACKAGE_TO_SRPM: dict[str, str] = {
     "systemd-udev": "systemd",
     # ---- libcap subpackages ----
     "libcap-devel": "libcap",
+    # ---- python packages whose SRPM is named differently ----
+    "python-pyyaml": "PyYAML",
+    "python3-pyyaml": "PyYAML",
+    "python-pyzmq": "python-zmq",
+    "python3-pyzmq": "python-zmq",
 }
 
 # Built from the python3.NN SRPM, where NN depends on the Fedora release
@@ -635,68 +646,67 @@ class PackageNameResolver:
         return result
 
     def get_download_candidates(self, name: str) -> list[str]:
+        """All names iter_download_candidates would try, as a list."""
+        return list(self.iter_download_candidates(name))
+
+    def iter_download_candidates(self, name: str) -> Iterator[str]:
         """
-        Return a list of package names to try when downloading an SRPM.
+        Names to try, most likely first, when downloading the SRPM for a dependency.
 
         Used for both aliases (e.g. glib2-devel -> glib2) and virtual provides.
-        Order: ML prediction (srpm_name, rpm_name), rule-based resolve,
-        resolve_srpm_name variants, then name.
+        Order: the known subpackage mapping; for a virtual provide the ML
+        prediction (srpm_name, rpm_name); SRPM name variants of the rule-based
+        name and of the name itself; for a plain name the ML prediction last. A generator: the ML
+        model is only loaded if the names before it are asked for and fail.
 
         Args:
             name: Package name or alias (e.g. "python3", "python3dist(requests)")
 
-        Returns:
-            List of names to try, deduplicated and ordered by likelihood.
+        Yields:
+            Names to try, without duplicates.
         """
         seen: set[str] = set()
-        candidates: list[str] = []
-
-        # Strip rich dependency syntax before processing
         name = self._strip_rich_dep(name)
 
-        # 0. Known subpackage mapping — highest priority (avoid futile lookups)
-        if name in SUBPACKAGE_TO_SRPM:
-            srpm = SUBPACKAGE_TO_SRPM[name]
-            if srpm not in seen:
-                seen.add(srpm)
-                candidates.append(srpm)
-
-        # 1. ML prediction (for aliases like python3 and virtual provides)
-        if self.ml_resolver:
-            try:
-                ml_result = self.ml_resolver.predict(name)
-                if ml_result and isinstance(ml_result, dict):
-                    for predicted in (ml_result.get("srpm_name"), ml_result.get("rpm_name")):
-                        if predicted and predicted not in seen:
-                            seen.add(predicted)
-                            candidates.append(predicted)
-            except Exception as exc:
-                logger.debug("ML prediction failed for %s: %s", name, exc)
-
-        # 2. Rule-based resolve (virtual provides)
-        resolved = self.resolve(name)
-        if resolved and resolved not in seen:
-            seen.add(resolved)
-            candidates.append(resolved)
-
-        # 3. SRPM name variants for the given name
-        for n in self.resolve_srpm_name(name):
-            if n not in seen:
-                seen.add(n)
-                candidates.append(n)
-
-        # 4. SRPM name variants for the rule-resolved name (if different)
-        if resolved and resolved != name:
-            for n in self.resolve_srpm_name(resolved):
-                if n not in seen:
+        def new(names) -> Iterator[str]:
+            for n in names:
+                if n and n not in seen:
                     seen.add(n)
-                    candidates.append(n)
+                    yield n
 
-        # 5. Original name (safety net; resolve() always adds name to candidates)
-        if name not in seen:  # pragma: no cover
-            candidates.append(name)
+        # Known subpackage mapping: avoids futile lookups
+        if name in SUBPACKAGE_TO_SRPM:
+            yield from new([SUBPACKAGE_TO_SRPM[name]])
 
-        return candidates
+        # A virtual provide is where the rules miss most (extras, case, `_` vs `-`):
+        # the model, trained on the release's own provides, goes first
+        is_provide = "(" in name
+        if is_provide:
+            yield from new(self._ml_candidates(name))
+
+        # SRPM names before RPM names: Koji looks builds up by SRPM name
+        resolved = self.resolve(name)
+        if resolved and resolved != name:
+            yield from new(self.resolve_srpm_name(resolved))
+            yield from new([resolved])
+        yield from new(self.resolve_srpm_name(name))
+        yield from new([name])
+
+        if not is_provide:
+            yield from new(self._ml_candidates(name))
+
+    def _ml_candidates(self, name: str) -> list[str]:
+        """SRPM and RPM names the ML model predicts for name; empty without a model."""
+        if not self.ml_resolver:
+            return []
+        try:
+            result = self.ml_resolver.predict(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ML prediction failed for %s: %s", name, exc)
+            return []
+        if not isinstance(result, dict):
+            return []
+        return [n for n in (result.get("srpm_name"), result.get("rpm_name")) if n]
 
 
 def create_name_resolver(

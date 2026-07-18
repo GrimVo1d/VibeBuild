@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock
 
+import pytest
+
 from vibebuild.ml_resolver import MLPackageResolver
 from vibebuild.name_resolver import (
     PROVIDE_PATTERNS,
@@ -181,11 +183,10 @@ class TestPackageNameResolverSRPMNames:
         assert result == ["python-six", "six", "python2-six"]
 
     def test_resolve_srpm_name_python_prefix_fallback(self):
-        # Many Fedora SRPMs drop the python- prefix (pyyaml, pytest, trustme).
-        # Without this rule prod_validation fetch fails on those packages.
+        # Some Fedora SRPMs drop the python- prefix (pytest, trustme).
         resolver = PackageNameResolver()
 
-        assert resolver.resolve_srpm_name("python-pyyaml") == ["python-pyyaml", "pyyaml"]
+        assert resolver.resolve_srpm_name("python-trustme") == ["python-trustme", "trustme"]
         assert resolver.resolve_srpm_name("python-pytest") == ["python-pytest", "pytest"]
         # python3-X also tries the bare name: the pytest SRPM builds python3-pytest.
         assert resolver.resolve_srpm_name("python3-pytest") == [
@@ -536,6 +537,59 @@ class TestGetDownloadCandidates:
         result = resolver.get_download_candidates("python3dist(requests)")
 
         assert "python-requests" in result
+
+    def test_plain_name_tries_rules_before_ml(self):
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": "ml-guess", "rpm_name": None}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        assert resolver.get_download_candidates("python3-requests") == [
+            "python-requests",
+            "requests",
+            "python3-requests",
+            "ml-guess",
+        ]
+
+    def test_plain_name_found_first_never_loads_the_model(self):
+        mock_ml = Mock()
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        assert next(resolver.iter_download_candidates("python-requests")) == "python-requests"
+        mock_ml.predict.assert_not_called()
+
+    def test_provide_tries_ml_first(self):
+        mock_ml = Mock()
+        mock_ml.predict.return_value = {"srpm_name": "pyOpenSSL", "rpm_name": "python3-pyOpenSSL"}
+        resolver = PackageNameResolver(ml_resolver=mock_ml)
+
+        result = resolver.get_download_candidates("python3dist(pyopenssl)")
+
+        assert result[:3] == ["pyOpenSSL", "python3-pyOpenSSL", "python-pyopenssl"]
+
+    @pytest.mark.parametrize(
+        ("provide", "rpm"),
+        [
+            ("python3dist(requests[socks])", "python3-requests"),
+            ("python3dist(requests[socks,security])", "python3-requests"),
+            ("crate(serde)", "rust-serde-devel"),
+            ("crate(serde/derive)", "rust-serde-devel"),
+        ],
+    )
+    def test_extras_and_features_resolve_to_the_base_package(self, provide, rpm):
+        assert PackageNameResolver().resolve(provide) == rpm
+
+    @pytest.mark.parametrize(
+        ("name", "srpm"),
+        [
+            ("python-pyyaml", "PyYAML"),
+            ("python3dist(pyyaml)", "PyYAML"),
+            ("python3-pyzmq", "python-zmq"),
+            ("crate(serde/derive)", "rust-serde"),
+            ("python3dist(requests[socks])", "python-requests"),
+        ],
+    )
+    def test_rules_find_the_srpm(self, name, srpm):
+        assert srpm in PackageNameResolver().get_download_candidates(name)
 
 
 class TestMLFallbackDictResult:

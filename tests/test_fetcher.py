@@ -156,7 +156,7 @@ class TestDownloadSrpm:
 
     def test_tries_name_resolver_candidates(self, tmp_path, hub, http, digest):
         resolver = MagicMock()
-        resolver.get_download_candidates.return_value = ["python-pyyaml", "PyYAML"]
+        resolver.iter_download_candidates.return_value = iter(["python-pyyaml", "PyYAML"])
 
         path = SRPMFetcher(download_dir=str(tmp_path), name_resolver=resolver).download_srpm(
             "python3-pyyaml"
