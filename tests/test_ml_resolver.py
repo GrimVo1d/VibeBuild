@@ -173,6 +173,17 @@ class TestSaveLoad:
 
         assert path.exists()
 
+    def test_save_replaces_atomically(self, trained, tmp_path, mocker):
+        path = tmp_path / "model.npz"
+        path.write_bytes(b"old model")
+        mocker.patch("numpy.savez_compressed", side_effect=OSError("disk full"))
+
+        with pytest.raises(OSError, match="disk full"):
+            trained.save(str(path))
+
+        assert path.read_bytes() == b"old model"
+        assert list(tmp_path.iterdir()) == [path]
+
     def test_save_untrained(self, tmp_path):
         with pytest.raises(VibeBuildError, match="No model"):
             MLPackageResolver().save(str(tmp_path / "m.npz"))

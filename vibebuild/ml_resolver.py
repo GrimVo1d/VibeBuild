@@ -16,6 +16,7 @@ import importlib.util
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -223,18 +224,28 @@ class MLPackageResolver:
         terms = sorted(vocabulary, key=vocabulary.__getitem__)
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "wb") as f:
-            np.savez_compressed(
-                f,
-                format=np.array(MODEL_FORMAT),
-                ngram_range=np.array(_NGRAM_RANGE),
-                confidence_threshold=np.array(self.confidence_threshold),
-                provides=np.array(self._provides, dtype=str),
-                rpm_names=np.array(self._rpm_names, dtype=str),
-                srpm_names=np.array(self._srpm_names, dtype=str),
-                terms=np.array(terms, dtype=str),
-                idf=self._vectorizer.idf_,
-            )
+        # Written next to the target and renamed over it: a reader never sees half a model
+        fd, tmp_name = tempfile.mkstemp(
+            dir=output_path.parent, prefix=f".{output_path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                np.savez_compressed(
+                    f,
+                    format=np.array(MODEL_FORMAT),
+                    ngram_range=np.array(_NGRAM_RANGE),
+                    confidence_threshold=np.array(self.confidence_threshold),
+                    provides=np.array(self._provides, dtype=str),
+                    rpm_names=np.array(self._rpm_names, dtype=str),
+                    srpm_names=np.array(self._srpm_names, dtype=str),
+                    terms=np.array(terms, dtype=str),
+                    idf=self._vectorizer.idf_,
+                )
+            os.chmod(tmp_name, 0o644)
+            os.replace(tmp_name, output_path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
         logger.info("Model saved to %s", path)
 
     def load(self, path: str) -> None:
