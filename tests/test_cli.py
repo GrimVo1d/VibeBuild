@@ -399,6 +399,7 @@ class TestCmdBuild:
             build_all_deps=False,
             patch_specs=True,
             allow_unsandboxed=False,
+            max_deps=100,
             name_resolver=None,
             download_dir=None,
             fedora_release="44",

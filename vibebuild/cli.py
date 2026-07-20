@@ -27,7 +27,7 @@ from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient
 from vibebuild.ml_resolver import default_model_path
 from vibebuild.name_resolver import PackageNameResolver, create_name_resolver
-from vibebuild.resolver import DependencyResolver
+from vibebuild.resolver import DEFAULT_MAX_PACKAGES, DependencyResolver
 
 FEDORA_KOJI = "https://koji.fedoraproject.org/kojihub"
 
@@ -171,6 +171,13 @@ Examples:
         action="store_true",
         help="Rebuild SRPMs locally without %%check, and retry builds failing on unpackaged "
         "files; runs rpmbuild on the spec, sandboxed with bwrap",
+    )
+    build_group.add_argument(
+        "--max-deps",
+        type=int,
+        default=DEFAULT_MAX_PACKAGES,
+        metavar="N",
+        help=f"Stop if more than N dependencies need building (default: {DEFAULT_MAX_PACKAGES})",
     )
     build_group.add_argument(
         "--allow-unsandboxed",
@@ -413,6 +420,7 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
         build_all_deps=opts.build_all_deps,
         patch_specs=opts.patch_specs,
         allow_unsandboxed=opts.allow_unsandboxed,
+        max_deps=opts.max_deps,
         name_resolver=name_resolver_for(opts),
         download_dir=opts.download_dir,
         fedora_release=release,

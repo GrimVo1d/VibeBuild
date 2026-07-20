@@ -11,10 +11,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from vibebuild.analyzer import BuildRequirement, PackageInfo, get_build_requires
-from vibebuild.exceptions import CircularDependencyError
+from vibebuild.exceptions import CircularDependencyError, DependencyResolutionError
 from vibebuild.koji_client import KojiClient
 
 logger = logging.getLogger(__name__)
+
+# Dependencies one run builds at most; --build-all-deps reaches the toolchain quickly
+DEFAULT_MAX_PACKAGES = 100
 
 try:
     import rpm as _rpm  # type: ignore
@@ -89,11 +92,13 @@ class DependencyResolver:
         koji_tag: str,
         name_resolver=None,
         build_all_deps: bool = False,
+        max_packages: int = DEFAULT_MAX_PACKAGES,
     ):
         self.koji = koji_client
         self.koji_tag = koji_tag
         self.name_resolver = name_resolver
         self.build_all_deps = build_all_deps
+        self.max_packages = max_packages  # dependencies to build, at most
         self._available_packages: set[str] | None = None
         self._dependency_graph: dict[str, DependencyNode] = {}
         self._root: str | None = None
@@ -325,12 +330,17 @@ class DependencyResolver:
 
         Returns:
             Dictionary mapping package names to DependencyNode objects
+
+        Raises:
+            DependencyResolutionError: If more than max_packages dependencies need building
         """
         self._dependency_graph = {}
         self._root = root_package
         visited = set()
+        to_build = 0
 
         def resolve_deps(pkg_name: str, pkg_srpm: str | None = None):
+            nonlocal to_build
             if pkg_name in visited:
                 return
             visited.add(pkg_name)
@@ -348,6 +358,13 @@ class DependencyResolver:
                 return
 
             node = DependencyNode(name=resolved_name, srpm_path=pkg_srpm)
+            if not is_root:
+                to_build += 1
+                if to_build > self.max_packages:
+                    raise DependencyResolutionError(
+                        f"More than {self.max_packages} dependencies of {root_package} "
+                        "need building; raise --max-deps to build them all"
+                    )
 
             if pkg_srpm:
                 try:
@@ -375,6 +392,8 @@ class DependencyResolver:
                     for dep, dep_srpm in zip(missing, dep_srpms, strict=True):
                         resolve_deps(dep, dep_srpm)
 
+                except DependencyResolutionError:
+                    raise
                 except Exception as exc:
                     logger.warning("Could not analyze %s: %s", resolved_name, exc)
                     node.dependencies = []

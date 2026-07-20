@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from vibebuild.analyzer import BuildRequirement
-from vibebuild.exceptions import CircularDependencyError
+from vibebuild.exceptions import CircularDependencyError, DependencyResolutionError
 from vibebuild.resolver import DependencyNode, DependencyResolver
 
 
@@ -602,3 +602,33 @@ class TestFindMissingDepsPrefetch:
             "gcc",
             "src-gcc",
         }
+
+
+class TestGraphSizeLimit:
+    def _walk(self, mock_koji_client, max_packages, length=5):
+        """A chain main -> p1 -> p2 -> ... -> p<length>, nothing of it in the tag."""
+        mock_koji_client.package_exists.return_value = False
+        resolver = DependencyResolver(
+            koji_client=mock_koji_client, koji_tag="f44-build", max_packages=max_packages
+        )
+
+        def requires(path):
+            n = 0 if path == "/main.src.rpm" else int(path[2:].split(".")[0])
+            return [f"p{n + 1}"] if n < length else []
+
+        with (
+            patch("vibebuild.resolver.get_build_requires", side_effect=requires),
+            patch.object(resolver, "find_missing_deps", side_effect=lambda deps: list(deps)),
+        ):
+            return resolver.build_dependency_graph(
+                "main", "/main.src.rpm", srpm_resolver=lambda pkg: f"/{pkg}.src.rpm"
+            )
+
+    def test_within_the_limit(self, mock_koji_client):
+        graph = self._walk(mock_koji_client, max_packages=5)
+
+        assert sorted(graph) == ["main", "p1", "p2", "p3", "p4", "p5"]
+
+    def test_over_the_limit_stops(self, mock_koji_client):
+        with pytest.raises(DependencyResolutionError, match="More than 3 dependencies of main"):
+            self._walk(mock_koji_client, max_packages=3)

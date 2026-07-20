@@ -63,7 +63,7 @@ Two Koji hubs are involved. Your hub, from `~/.koji/config` or `--server`, is as
 1. **Get the SRPM.** A path is used as is; a name is downloaded from Fedora Koji, from the release that matches the target (`f44` → `f44-updates`, then `f44`), `--fedora-release`, or rawhide.
 2. **Look up the target** on your hub: its build tag and destination tag.
 3. **Log in once.** `KojiSession` holds a single logged-in session for the whole run.
-4. **Resolve.** Read the target's BuildRequires, find the missing ones, download their SRPMs, read *their* BuildRequires, and so on, until nothing new is missing. The result is a list of levels.
+4. **Resolve.** Read the target's BuildRequires, find the missing ones, download their SRPMs, read *their* BuildRequires, and so on, until nothing new is missing. The result is a list of levels. More than `--max-deps` (100) packages to build stops the run here.
 5. **Build the levels.** Before the first submit, make the build repo current: if the build tag or anything it inherits changed since its last repo, start `newRepo` and wait for it. Submit every package of a level, poll until all finish, retry unpackaged-file failures (with `--patch-specs`). If anything was built, regenerate the repo before the next level.
 6. **Build the target**, if every dependency succeeded and the target's NVR is not built yet, the same way, waiting for it unless `--nowait`. A target that is not built because a dependency failed is listed as such in the summary.
 7. **Report.** What was tagged into the destination tag, which toolchains the BuildRequires use, and every task with its state and, for a failed one, the reason Koji gives.

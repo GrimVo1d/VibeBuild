@@ -81,6 +81,7 @@ Other options:
 | Option | Effect |
 | --- | --- |
 | `--build-all-deps` | Build every dependency locally, even if the tag's external repos provide it. On a real package the graph quickly reaches the toolchain and grows to hundreds of packages. |
+| `--max-deps N` | Stop before building anything if more than N dependencies need building (default 100). |
 | `--patch-specs` | Rebuild each SRPM with `%check` removed before submitting it, and retry once a build that fails on unpackaged files. Off by default: rebuilding runs `rpmbuild -bs`, which executes the spec's macros. It runs under bubblewrap; if bwrap cannot sandbox it, the build stops before anything is submitted. |
 | `--allow-unsandboxed` | With `--patch-specs`, run `rpmbuild` without a sandbox, as the current user, where bwrap is missing or cannot create namespaces. |
 | `--nowait` | Submit the target build and do not wait for it. |

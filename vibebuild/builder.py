@@ -13,7 +13,7 @@ from vibebuild.exceptions import KojiBuildError, SRPMNotFoundError
 from vibebuild.fetcher import SRPMFetcher
 from vibebuild.koji_client import KojiClient, KojiSession, poll_interval, task_state_name
 from vibebuild.name_resolver import PackageNameResolver
-from vibebuild.resolver import DependencyResolver
+from vibebuild.resolver import DEFAULT_MAX_PACKAGES, DependencyResolver
 from vibebuild.spec_patcher import check_can_patch, cleanup_patched, patch_srpm
 from vibebuild.toolchain import detect_toolchains
 
@@ -100,6 +100,7 @@ class KojiBuilder:
         build_all_deps: bool = False,
         patch_specs: bool = False,
         allow_unsandboxed: bool = False,
+        max_deps: int = DEFAULT_MAX_PACKAGES,
         name_resolver: PackageNameResolver | None = None,
         download_dir: str | None = None,
         fedora_release: str = "rawhide",
@@ -124,6 +125,7 @@ class KojiBuilder:
             koji_tag=build_tag,
             name_resolver=name_resolver,
             build_all_deps=build_all_deps,
+            max_packages=max_deps,
         )
         self.fetcher = SRPMFetcher(
             download_dir=download_dir,
