@@ -63,8 +63,24 @@
   when: not koji_schema.query_result[0].loaded
   changed_when: true
 
-- name: Collect the service list
-  ansible.builtin.service_facts:
+- name: Install firewalld
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+- name: Start firewalld
+  ansible.builtin.systemd_service:
+    name: firewalld
+    state: started
+    enabled: true
+
+# Before anything else is opened, so the playbook never locks itself out
+- name: Keep SSH open
+  ansible.posix.firewalld:
+    service: ssh
+    permanent: true
+    immediate: true
+    state: enabled
 
 - name: Open the firewall
   ansible.posix.firewalld:
@@ -73,7 +89,6 @@
     immediate: true
     state: enabled
   loop: "{{ firewall_ports }}"
-  when: ansible_facts.services['firewalld.service'].state | default('') == 'running'
 
 - name: Start Apache
   ansible.builtin.systemd_service:

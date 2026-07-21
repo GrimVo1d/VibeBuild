@@ -24,3 +24,10 @@ SSLCryptoDevice builtin
     SSLVerifyDepth 10
     SSLOptions +StdEnvVars +ExportCertData
 </VirtualHost>
+
+# Plain HTTP only redirects: the hub, the web UI and /kojifiles are served over TLS.
+# Redirect is applied before the server-wide Alias directives, so nothing leaks on port 80.
+<VirtualHost *:80>
+    ServerName {{ koji_hub_fqdn }}
+    Redirect permanent / https://{{ koji_hub_fqdn }}/
+</VirtualHost>
