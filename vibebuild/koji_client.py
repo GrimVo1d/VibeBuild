@@ -27,6 +27,18 @@ FINAL_TASK_STATES = ("closed", "failed", "canceled")
 # Seconds one hub call may take; koji's own default is 12 hours.
 HUB_TIMEOUT = 300
 
+# History tables whose changes alter what a tag's repo contains (see repo_is_current)
+REPO_CONTENT_TABLES = (
+    "tag_listing",
+    "tag_inheritance",
+    "tag_config",
+    "tag_extra",
+    "tag_external_repos",
+    "group_config",
+    "group_req_listing",
+    "group_package_listing",
+)
+
 
 def poll_interval(elapsed_s: float, max_interval: int = 30) -> float:
     """
@@ -314,7 +326,11 @@ class KojiSession:
         return "timeout"
 
     def repo_is_current(self, tag: str) -> bool:
-        """True if the tag has a ready repo and nothing it inherits changed since."""
+        """True if the tag has a ready repo and nothing it inherits changed its content since.
+
+        Unlike tagChangedSinceEvent, adding a package to a tag's package list does not
+        count: every build does that first, and it changes nothing in the repo.
+        """
         session = self.session
         try:
             repo = session.getRepo(tag)
@@ -322,7 +338,18 @@ class KojiSession:
                 return False
             tag_ids = [session.getTag(tag, strict=True)["id"]]
             tag_ids += [link["parent_id"] for link in session.getFullInheritance(tag)]
-            return not session.tagChangedSinceEvent(repo["create_event"], tag_ids)
+            for tag_id in tag_ids:
+                history = session.queryHistory(
+                    tables=[*REPO_CONTENT_TABLES, "tag_packages"],
+                    tag=tag_id,
+                    afterEvent=repo["create_event"],
+                )
+                if any(history.get(table) for table in REPO_CONTENT_TABLES):
+                    return False
+                # A block (or its removal) hides packages from the repo
+                if any(entry.get("blocked") for entry in history.get("tag_packages", [])):
+                    return False
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("repo freshness check for %s failed: %s", tag, exc)
             return False

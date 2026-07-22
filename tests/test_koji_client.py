@@ -386,15 +386,29 @@ class TestRepo:
         mock_koji_session.getRepo.return_value = {"id": 1, "create_event": 500}
         mock_koji_session.getTag.return_value = {"id": 10}
         mock_koji_session.getFullInheritance.return_value = [{"parent_id": 11}]
-        mock_koji_session.tagChangedSinceEvent.return_value = False
+        mock_koji_session.queryHistory.return_value = {"tag_listing": [], "tag_packages": []}
         return mock_koji_session
 
     def test_repo_is_current(self, hub_session, tags):
         assert hub_session.repo_is_current("f44-build") is True
-        tags.tagChangedSinceEvent.assert_called_once_with(500, [10, 11])
+        assert [c.kwargs["tag"] for c in tags.queryHistory.call_args_list] == [10, 11]
+        assert tags.queryHistory.call_args.kwargs["afterEvent"] == 500
 
-    def test_repo_changed(self, hub_session, tags):
-        tags.tagChangedSinceEvent.return_value = True
+    def test_new_build_in_a_parent_makes_it_stale(self, hub_session, tags):
+        tags.queryHistory.side_effect = [
+            {"tag_listing": []},
+            {"tag_listing": [{"build_id": 7}]},
+        ]
+
+        assert hub_session.repo_is_current("f44-build") is False
+
+    def test_added_package_keeps_it_current(self, hub_session, tags):
+        tags.queryHistory.return_value = {"tag_packages": [{"blocked": False}]}
+
+        assert hub_session.repo_is_current("f44-build") is True
+
+    def test_blocked_package_makes_it_stale(self, hub_session, tags):
+        tags.queryHistory.return_value = {"tag_packages": [{"blocked": True}]}
 
         assert hub_session.repo_is_current("f44-build") is False
 
