@@ -295,6 +295,13 @@ class TestSandboxed:
         i = cmd.index("--bind")
         assert cmd[i + 1 : i + 3] == [str(tmp_path), str(tmp_path)]
 
+    def test_probe_uses_the_full_sandbox(self, tmp_path, probe):
+        _sandboxed(["rpmbuild"], tmp_path)
+
+        argv = probe.call_args.args[0]
+        assert argv[-1] == "true"
+        assert "--proc" in argv and "--cap-drop" in argv
+
     def test_bwrap_is_probed_once(self, tmp_path, probe):
         _sandboxed(["a"], tmp_path)
         _sandboxed(["b"], tmp_path)

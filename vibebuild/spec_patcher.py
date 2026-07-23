@@ -184,18 +184,23 @@ def _rpm_path(path: Path) -> str:
 
 @functools.cache
 def _bwrap() -> tuple[str | None, str]:
-    """Path to a working bwrap and "", or None and why there is none."""
+    """Path to a working bwrap and "", or None and why there is none.
+
+    The probe runs `true` in the very sandbox rpmbuild gets: a container may allow
+    namespaces but refuse a fresh /proc, which only shows with the full set of mounts.
+    """
     bwrap = shutil.which("bwrap")
     if not bwrap:
         return None, "bwrap not found"
     try:
-        # List argv without a shell; bwrap is the absolute path from shutil.which
-        probe = subprocess.run(  # nosec B603
-            [bwrap, "--unshare-all", "--cap-drop", "ALL", "--ro-bind", "/", "/", "true"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        with tempfile.TemporaryDirectory(prefix="vibebuild-probe-") as work_dir:
+            # List argv without a shell; bwrap is the absolute path from shutil.which
+            probe = subprocess.run(  # nosec B603
+                _sandbox_argv(bwrap, Path(work_dir)) + ["true"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
     except (OSError, subprocess.TimeoutExpired) as e:
         probe = subprocess.CompletedProcess([], 1, "", str(e))
     if probe.returncode != 0:
@@ -240,9 +245,14 @@ def _sandboxed(cmd: list[str], work_dir: Path, allow_unsandboxed: bool = False) 
             _require_sandbox()
         _warn_unsandboxed(problem)
         return cmd
+    return _sandbox_argv(bwrap, work_dir) + cmd
+
+
+def _sandbox_argv(bwrap: str, work_dir: Path) -> list[str]:
+    """bwrap's argv up to the command it runs."""
     # A fresh tmpfs inside the sandbox, not the host /tmp
     sandbox_tmp = "/tmp"  # nosec B108
-    sandbox = [
+    return [
         bwrap,
         "--unshare-all",
         "--die-with-parent",
@@ -266,7 +276,6 @@ def _sandboxed(cmd: list[str], work_dir: Path, allow_unsandboxed: bool = False) 
         "--setenv", "HOME", str(work_dir),
         "--chdir", str(work_dir),
     ]  # fmt: skip
-    return sandbox + cmd
 
 
 def patch_srpm(
