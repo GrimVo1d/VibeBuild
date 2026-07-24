@@ -123,6 +123,8 @@ vibebuild --dry-run python-requests      # inside the client
 
 The web UI is at <https://localhost:8443/koji> (published on 127.0.0.1 only). The stand has no `kojira`: VibeBuild creates repos itself, and `make regen-repo` does it by hand. The first repo after `make setup` takes a few minutes. `make init` re-runs the hub setup and is safe to repeat, `make stop` stops the containers, `make clean` also removes the volumes, certificates and `.env`. The Fedora release is `FEDORA_VERSION` in `.env`.
 
+Each container mounts only the certificates it uses; the CA key stays on the host. The client container runs with Docker's seccomp profile and `/proc` masking turned off, so bubblewrap can sandbox `--patch-specs` inside it. The hub has e-mail notifications disabled, since the stand has no SMTP server.
+
 ## Deploying Koji
 
 `ansible/` installs Koji on a single Fedora 44 machine: PostgreSQL, a CA with server and client certificates, hub, web UI, a builder and the tags and target VibeBuild expects.

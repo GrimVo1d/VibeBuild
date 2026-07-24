@@ -5,7 +5,7 @@ FROM fedora:${FEDORA_VERSION}
 RUN dnf install -y \
         python3 python3-pip python3-devel \
         python3-setuptools python3-wheel \
-        rpm rpm-build rpmdevtools \
+        rpm rpm-build rpmdevtools bubblewrap \
         koji \
         gcc gcc-c++ make \
         git curl jq which findutils less procps-ng \

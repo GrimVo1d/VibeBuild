@@ -27,7 +27,12 @@ services:
       # Web UI only; vibebuild-dev and the builder talk to the hub over koji-net.
       - "127.0.0.1:${KOJI_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./ssl:/etc/pki/koji:ro,Z
+      # Each service gets only the certificates it uses; the CA key stays on the host
+      - ./ssl/koji_ca_cert.crt:/etc/pki/koji/koji_ca_cert.crt:ro,Z
+      - ./ssl/kojihub.crt:/etc/pki/koji/kojihub.crt:ro,Z
+      - ./ssl/kojihub.key:/etc/pki/koji/kojihub.key:ro,Z
+      - ./ssl/kojiweb.pem:/etc/pki/koji/kojiweb.pem:ro,Z
+      - ./ssl/kojiadmin.pem:/etc/pki/koji/kojiadmin.pem:ro,Z
       - koji-data:/mnt/koji
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-koji}
@@ -52,7 +57,8 @@ services:
       koji-hub:
         condition: service_healthy
     volumes:
-      - ./ssl:/etc/pki/koji:ro,Z
+      - ./ssl/koji_ca_cert.crt:/etc/pki/koji/koji_ca_cert.crt:ro,Z
+      - ./ssl/kojibuilder.pem:/etc/pki/koji/kojibuilder.pem:ro,Z
       - koji-data:/mnt/koji
     privileged: true
     networks:
@@ -68,11 +74,18 @@ services:
         condition: service_healthy
     volumes:
       - ../..:/workspace
-      - ./ssl:/etc/pki/koji:ro,Z
+      - ./ssl/koji_ca_cert.crt:/etc/pki/koji/koji_ca_cert.crt:ro,Z
+      - ./ssl/kojiadmin.pem:/etc/pki/koji/kojiadmin.pem:ro,Z
       - vibebuild-cache:/root/.cache/vibebuild
     environment:
       KOJI_TARGET: ${KOJI_TARGET:-f44}
       KOJI_BUILD_TAG: ${KOJI_BUILD_TAG:-f44-build}
+    # Docker's default seccomp profile forbids the user namespaces bwrap needs, and
+    # its masked /proc paths stop bwrap from mounting a fresh /proc. Without these
+    # --patch-specs would have to run spec macros unsandboxed, as root.
+    security_opt:
+      - seccomp:unconfined
+      - systempaths=unconfined
     networks:
       - koji-net
     # keep the container alive via entrypoint sleep infinity

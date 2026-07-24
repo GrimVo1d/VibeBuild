@@ -50,9 +50,13 @@ KOJI_ARCH="${KOJI_ARCH:-$($COMPOSE exec -T koji-hub uname -m | tr -d '\r')}"
 echo "==> Using KOJI_ARCH=${KOJI_ARCH}, Fedora ${FEDORA_VERSION}"
 
 echo "==> Creating admin user..."
+# The credentials come from the hub container's environment, not from argv
 $COMPOSE exec -T koji-hub python3 -c "
-import psycopg2
-conn = psycopg2.connect(host='db', dbname='${POSTGRES_DB}', user='${POSTGRES_USER}', password='${POSTGRES_PASSWORD}')
+import os, psycopg2
+env = os.environ
+conn = psycopg2.connect(
+    host='db', dbname=env['POSTGRES_DB'], user=env['POSTGRES_USER'], password=env['POSTGRES_PASSWORD']
+)
 cur = conn.cursor()
 cur.execute(\"SELECT id FROM users WHERE name='kojiadmin'\")
 if cur.fetchone() is None:

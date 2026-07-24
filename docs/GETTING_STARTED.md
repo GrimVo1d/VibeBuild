@@ -222,7 +222,7 @@ vibebuild --patch-specs python-requests
 
 VibeBuild submits `python-idna`, waits for it, regenerates the `f44-build` repo, then builds and tags `python-requests`. On the stand this takes about 20 minutes, a good part of it in repo regeneration.
 
-`--patch-specs` removes the `%check` section before submitting. Without it the `python-idna` part works the same, but `python-requests` fails in its own tests: four of them expect a connection to an unroutable address to time out, and the stand's Docker network refuses it at once. That is the kind of build `--patch-specs` is for. The client container has no bubblewrap, so VibeBuild warns that it parses the spec without a sandbox.
+`--patch-specs` removes the `%check` section before submitting. Without it the `python-idna` part works the same, but `python-requests` fails in its own tests: four of them expect a connection to an unroutable address to time out, and the stand's Docker network refuses it at once. That is the kind of build `--patch-specs` is for. Rebuilding the SRPM runs the spec's macros, so it happens inside a bubblewrap sandbox; the client container has bubblewrap installed for that.
 
 Run the same command again: `python-idna` is no longer missing, and `python-requests` is reported as already built (`=`). Nothing is submitted.
 
