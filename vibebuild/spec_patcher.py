@@ -29,6 +29,7 @@ import subprocess  # nosec B404
 import sys
 import tarfile
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -145,6 +146,16 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
         proc = subprocess.Popen(  # nosec B603 B607
             ["rpm2archive", "-"], stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
+        # The timeout covers the extraction too: killing rpm2archive ends the stream
+        # tarfile is blocked on
+        timed_out = threading.Event()
+
+        def kill() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout, kill)
+        timer.start()
         try:
             with tarfile.open(fileobj=proc.stdout, mode="r|gz") as archive:
                 # _size_limited wraps tarfile.data_filter, which bandit does not see through
@@ -152,14 +163,19 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
                 archive.extractall(dest, filter=size_limited)  # nosec B202
             _, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            proc.kill()
             raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}") from exc
         except (tarfile.TarError, OSError) as exc:
-            proc.kill()
+            if timed_out.is_set():
+                raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}") from exc
             raise VibeBuildError(f"Cannot extract {srpm.name}: {exc}") from exc
-        except VibeBuildError:
-            proc.kill()
-            raise
+        finally:
+            timer.cancel()
+            # On any error rpm2archive may still run: stop and reap it
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    if timed_out.is_set():
+        raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}")
     if proc.returncode != 0:
         raise VibeBuildError(
             f"rpm2archive failed on {srpm.name} (rc={proc.returncode}): "

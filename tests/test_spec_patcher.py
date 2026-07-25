@@ -261,6 +261,19 @@ class TestExtractSrpm:
         with pytest.raises(VibeBuildError, match="Cannot extract"):
             _extract_srpm(srpm, dest, timeout=30)
 
+    def test_hanging_rpm2archive_times_out(self, tmp_path, monkeypatch):
+        real_popen = subprocess.Popen
+        monkeypatch.setattr(
+            spec_patcher.subprocess, "Popen", lambda cmd, **kw: real_popen(["sleep", "30"], **kw)
+        )
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(b"")
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with pytest.raises(VibeBuildError, match="timed out"):
+            _extract_srpm(srpm, dest, timeout=1)
+
 
 def test_rpm_path_escapes_percent():
     assert _rpm_path(Path("/tmp/a%{lua:x}")) == "/tmp/a%%{lua:x}"
