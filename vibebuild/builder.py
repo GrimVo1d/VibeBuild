@@ -68,6 +68,7 @@ class BuildResult:
     tasks: list[BuildTask] = field(default_factory=list)
     failed_packages: list[str] = field(default_factory=list)
     built_packages: list[str] = field(default_factory=list)
+    already_built: list[str] = field(default_factory=list)  # already in Koji, nothing submitted
     total_time: float = 0.0
     toolchains: list[str] = field(default_factory=list)
     tagged_target: str | None = None
@@ -461,7 +462,10 @@ class KojiBuilder:
 
         logger.info("VibeBuild complete in %.1fs", result.total_time)
         logger.info(
-            "Built: %d, Failed: %d", len(result.built_packages), len(result.failed_packages)
+            "Built: %d, already built: %d, failed: %d",
+            len(result.built_packages),
+            len(result.already_built),
+            len(result.failed_packages),
         )
         return result
 
@@ -516,10 +520,12 @@ class KojiBuilder:
     def _record(self, result: BuildResult, task: BuildTask) -> None:
         """Add a finished (or, with nowait, submitted) task to the result."""
         result.tasks.append(task)
-        ok = task.status in (BuildStatus.COMPLETE, BuildStatus.ALREADY_BUILT) or (
+        ok = task.status == BuildStatus.COMPLETE or (
             task.status == BuildStatus.BUILDING and self.nowait
         )
-        if ok:
+        if task.status == BuildStatus.ALREADY_BUILT:
+            result.already_built.append(task.package_name)
+        elif ok:
             result.built_packages.append(task.package_name)
         else:
             result.failed_packages.append(task.package_name)
@@ -581,9 +587,10 @@ class KojiBuilder:
             logger.warning("list-tagged for %s failed: %s", self.dest_tag, exc)
             return
         result.tagged_target = None if self.scratch else tagged.get(target_name)
-        if target_name in result.built_packages and not result.tagged_target and not self.scratch:
+        done = result.built_packages + result.already_built
+        if target_name in done and not result.tagged_target and not self.scratch:
             logger.warning("target %s built, but not found in tag %s", target_name, self.dest_tag)
-        for pkg in result.built_packages:
+        for pkg in done:
             if pkg == target_name:
                 continue
             nvr = tagged.get(pkg)

@@ -225,6 +225,15 @@ class TestPrintBuildResult:
         assert "FAILED" in out
         assert "pkg2" in out
 
+    def test_already_built_is_not_counted_as_built(self, capsys):
+        print_build_result(BuildResult(success=True, already_built=["main"]))
+
+        out = capsys.readouterr().out
+        assert "Packages built: 0" in out
+        assert "Already built: 1" in out
+        assert "Already built, nothing submitted:\n  = main" in out
+        assert "Successfully built" not in out
+
     def test_prints_skipped_target(self, capsys):
         print_build_result(
             BuildResult(success=False, failed_packages=["dep"], skipped_packages=["main"])

@@ -238,6 +238,8 @@ def print_build_result(result: BuildResult) -> None:
     print("Status: SUCCESS ✓" if result.success else "Status: FAILED ✗")
     print(f"Total time: {result.total_time:.1f} seconds")
     print(f"Packages built: {len(result.built_packages)}")
+    if result.already_built:
+        print(f"Already built: {len(result.already_built)}")
     print(f"Packages failed: {len(result.failed_packages)}")
 
     if result.tagged_target:
@@ -256,6 +258,11 @@ def print_build_result(result: BuildResult) -> None:
         print("\nSuccessfully built:")
         for pkg in result.built_packages:
             print(f"  ✓ {pkg}")
+
+    if result.already_built:
+        print("\nAlready built, nothing submitted:")
+        for pkg in result.already_built:
+            print(f"  = {pkg}")
 
     if result.failed_packages:
         print("\nFailed packages:")

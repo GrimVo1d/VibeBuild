@@ -1225,7 +1225,8 @@ class TestAlreadyBuilt:
             result = builder.build_with_deps(str(srpm))
 
         assert result.success is True
-        assert result.built_packages == ["test-pkg"]
+        assert result.built_packages == []
+        assert result.already_built == ["test-pkg"]
 
     def test_already_built_target_needs_no_repo(self, srpm, mock_koji_session):
         builder = make_builder()
@@ -1261,7 +1262,8 @@ class TestAlreadyBuilt:
             result = builder.build_with_deps(str(srpm))
 
         assert result.success is True
-        assert result.built_packages == ["dep", "test-pkg"]
+        assert result.built_packages == ["test-pkg"]
+        assert result.already_built == ["dep"]
         wait.assert_not_called()
 
 
