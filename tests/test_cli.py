@@ -489,12 +489,16 @@ class TestDryRun:
     def test_without_dependencies(self, srpm, capsys):
         with (
             patch("vibebuild.cli.KojiBuilder") as mock_builder,
-            patch("vibebuild.cli.get_package_info_from_srpm", return_value=_info()),
+            patch(
+                "vibebuild.cli.get_package_info_from_srpm",
+                return_value=_info(requires=["gcc", "make"]),
+            ),
         ):
             mock_builder.return_value.resolve_build_chain.return_value = []
             cmd_build(make_opts("--dry-run"), "f44", str(srpm), "44")
 
-        assert "No dependencies to build" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "No dependencies to build: all 2 BuildRequires are available" in out
 
     def test_no_deps_skips_resolution(self, srpm, capsys):
         with (

@@ -436,7 +436,8 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
     try:
         if opts.dry_run:
             print("DRY RUN - showing what would be built:\n")
-            nvr = get_package_info_from_srpm(srpm_path).nvr
+            info = get_package_info_from_srpm(srpm_path)
+            nvr = info.nvr
             print(f"Target package: {nvr}")
             if not opts.no_deps:
                 build_chain = builder.resolve_build_chain(srpm_path)
@@ -446,7 +447,10 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
                         print(f"  Level {level_idx + 1}: {', '.join(level)}")
                     print(f"Then: {nvr}")
                 else:
-                    print("\nNo dependencies to build")
+                    print(
+                        f"\nNo dependencies to build: all {len(info.build_requires)} "
+                        "BuildRequires are available (--analyze-only lists them)"
+                    )
             return 0
 
         result = builder.build_with_deps(srpm_path, resolve_deps=not opts.no_deps)
