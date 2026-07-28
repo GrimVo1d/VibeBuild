@@ -2,6 +2,8 @@
 
 import json
 import logging
+import subprocess  # nosec B404
+import sys
 from pathlib import Path
 from unittest.mock import ANY, patch
 
@@ -744,3 +746,15 @@ class TestTrainSubcommand:
         mocker.patch("vibebuild.training.collect", side_effect=VibeBuildError("no mirror"))
 
         assert main(["train", "--release", "44"]) == 1
+
+
+def test_missing_koji_module_is_reported_without_traceback():
+    # A fresh interpreter where `import koji` fails, as on a host without python3-koji
+    code = "import sys; sys.modules['koji'] = None; import vibebuild.cli"
+    proc = subprocess.run(  # nosec B603
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert proc.returncode == 1
+    assert "needs the koji Python module" in proc.stderr
+    assert "Traceback" not in proc.stderr

@@ -19,6 +19,14 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    import koji  # type: ignore[import-untyped]  # noqa: F401
+except ImportError:
+    sys.exit(
+        "vibebuild needs the koji Python module: install python3-koji (dnf install python3-koji) "
+        "and create the virtualenv with --system-site-packages"
+    )
+
 from vibebuild import __version__
 from vibebuild.analyzer import get_package_info_from_srpm
 from vibebuild.builder import BuildResult, BuildStatus, KojiBuilder
