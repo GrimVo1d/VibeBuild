@@ -21,7 +21,9 @@ from pathlib import Path
 
 try:
     import koji  # type: ignore[import-untyped]  # noqa: F401
-except ImportError:
+except ImportError as exc:
+    if exc.name != "koji":
+        raise  # koji is there but broken: show the real error
     sys.exit(
         "vibebuild needs the koji Python module: install python3-koji (dnf install python3-koji) "
         "and create the virtualenv with --system-site-packages"
@@ -52,7 +54,8 @@ def load_koji_config() -> dict[str, str | None]:
     for path in [Path.home() / ".koji" / "config", Path("/etc/koji.conf")]:
         if not path.exists():
             continue
-        config = configparser.ConfigParser()
+        # No interpolation: a `%` in a value is literal, as for the koji CLI
+        config = configparser.ConfigParser(interpolation=None)
         try:
             config.read(path, encoding="utf-8")
         except (configparser.Error, OSError):

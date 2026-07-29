@@ -672,6 +672,11 @@ class TestLoadKojiConfig:
     def test_no_files(self, home):
         assert load_koji_config() == NO_KOJI_CONFIG
 
+    def test_percent_in_a_value_is_literal(self, home):
+        (home / ".koji" / "config").write_text("[koji]\nserver = https://koji/hub?a=%z\n")
+
+        assert load_koji_config()["server"] == "https://koji/hub?a=%z"
+
     def test_corrupt_file(self, home):
         (home / ".koji" / "config").write_text("THIS IS NOT\nVALID INI\n[[[broken")
 
@@ -758,3 +763,17 @@ def test_missing_koji_module_is_reported_without_traceback():
     assert proc.returncode == 1
     assert "needs the koji Python module" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_broken_koji_module_shows_the_real_error(tmp_path):
+    # koji is installed, but one of its own imports fails
+    (tmp_path / "koji").mkdir()
+    (tmp_path / "koji" / "__init__.py").write_text("import vibebuild_missing_dep\n")
+    code = f"import sys; sys.path.insert(0, {str(tmp_path)!r}); import vibebuild.cli"
+    proc = subprocess.run(  # nosec B603
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert proc.returncode == 1
+    assert "No module named 'vibebuild_missing_dep'" in proc.stderr
+    assert "needs the koji Python module" not in proc.stderr
