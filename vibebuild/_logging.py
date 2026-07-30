@@ -12,7 +12,25 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
+
+# C0/C1 control characters except tab and newline: an SRPM header or a message
+# from the hub could otherwise send escape sequences to the terminal
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(text: object) -> str:
+    """text as a string with terminal control characters replaced by `?`."""
+    return _CONTROL_CHARS.sub("?", str(text))
+
+
+class TextFormatter(logging.Formatter):
+    """Plain log lines without terminal control characters."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return clean(super().format(record))
+
 
 # LogRecord attributes that we do NOT copy into JSON (everything in the standard set).
 _STANDARD_ATTRS = frozenset(
@@ -65,4 +83,5 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = repr(value)
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
+        # json escapes C0 characters but leaves DEL and C1 (8-bit CSI) raw
+        return clean(json.dumps(payload, ensure_ascii=False))

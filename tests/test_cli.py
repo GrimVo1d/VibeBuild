@@ -174,6 +174,26 @@ class TestSetupLogging:
 
         assert isinstance(logging.getLogger().handlers[0].formatter, JsonFormatter)
 
+    def test_json_logs_drop_del_and_c1(self):
+        setup_logging(json_logs=True)
+        record = logging.LogRecord("x", logging.ERROR, "", 0, "a\x9b31m\x7fb", (), None)
+
+        line = logging.getLogger().handlers[0].format(record)
+
+        assert "\x9b" not in line and "\x7f" not in line
+        assert json.loads(line)["message"] == "a?31m?b"
+
+    def test_text_logs_drop_terminal_escapes(self):
+        setup_logging()
+        record = logging.LogRecord(
+            "x", logging.ERROR, "", 0, "Build FAILED: %s", ("\x1b]0;pwn\x07",), None
+        )
+
+        line = logging.getLogger().handlers[0].format(record)
+
+        assert "\x1b" not in line and "\x07" not in line
+        assert line.endswith("Build FAILED: ?]0;pwn?")
+
 
 class TestFedoraRelease:
     @pytest.mark.parametrize(
@@ -235,6 +255,29 @@ class TestPrintBuildResult:
         assert "Already built: 1" in out
         assert "Already built, nothing submitted:\n  = main" in out
         assert "Successfully built" not in out
+
+    def test_untrusted_text_cannot_send_terminal_escapes(self, capsys):
+        task = BuildTask(
+            "pkg\x1b[2J", "/p", "t", status=BuildStatus.FAILED, error_message="bad\x1b[31m\nnext"
+        )
+        print_build_result(
+            BuildResult(success=False, failed_packages=[task.package_name], tasks=[task])
+        )
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "✗ pkg?[2J" in out
+        assert "Error: bad?[31m next" in out
+
+    def test_untrusted_text_cannot_fake_summary_lines(self, capsys):
+        task = BuildTask(
+            "pkg", "/p", "t", status=BuildStatus.FAILED, error_message="boom\nStatus: SUCCESS ✓"
+        )
+        print_build_result(BuildResult(success=False, failed_packages=["pkg"], tasks=[task]))
+
+        lines = capsys.readouterr().out.splitlines()
+        assert "Status: FAILED ✗" in lines
+        assert "Status: SUCCESS ✓" not in lines
 
     def test_prints_skipped_target(self, capsys):
         print_build_result(

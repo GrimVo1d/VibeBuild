@@ -30,6 +30,7 @@ except ImportError as exc:
     )
 
 from vibebuild import __version__
+from vibebuild._logging import JsonFormatter, TextFormatter, clean
 from vibebuild.analyzer import get_package_info_from_srpm
 from vibebuild.builder import BuildResult, BuildStatus, KojiBuilder
 from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
@@ -69,6 +70,16 @@ def load_koji_config() -> dict[str, str | None]:
     return out
 
 
+def _out(text: str) -> None:
+    """Print a line of output; names and messages from SRPMs and the hub are untrusted."""
+    print(clean(text))
+
+
+def _line(value: object) -> str:
+    """An untrusted value on one line: a newline in it could fake lines of the summary."""
+    return " ".join(str(value).split())
+
+
 def setup_logging(verbose: bool = False, quiet: bool = False, json_logs: bool = False) -> None:
     """Configure the root logger; json_logs switches to one JSON object per line."""
     if quiet:
@@ -80,12 +91,10 @@ def setup_logging(verbose: bool = False, quiet: bool = False, json_logs: bool = 
 
     handler = logging.StreamHandler()
     if json_logs:
-        from vibebuild._logging import JsonFormatter
-
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+            TextFormatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
         )
 
     root = logging.getLogger()
@@ -242,51 +251,51 @@ Examples:
 
 def print_build_result(result: BuildResult) -> None:
     """Print build result summary."""
-    print("\n" + "=" * 60)
-    print("BUILD SUMMARY")
-    print("=" * 60)
+    _out("\n" + "=" * 60)
+    _out("BUILD SUMMARY")
+    _out("=" * 60)
 
-    print("Status: SUCCESS ✓" if result.success else "Status: FAILED ✗")
-    print(f"Total time: {result.total_time:.1f} seconds")
-    print(f"Packages built: {len(result.built_packages)}")
+    _out("Status: SUCCESS ✓" if result.success else "Status: FAILED ✗")
+    _out(f"Total time: {result.total_time:.1f} seconds")
+    _out(f"Packages built: {len(result.built_packages)}")
     if result.already_built:
-        print(f"Already built: {len(result.already_built)}")
-    print(f"Packages failed: {len(result.failed_packages)}")
+        _out(f"Already built: {len(result.already_built)}")
+    _out(f"Packages failed: {len(result.failed_packages)}")
 
     if result.tagged_target:
-        print("\nTagged packages:")
-        print(f"  ✓ {result.tagged_target}")
+        _out("\nTagged packages:")
+        _out(f"  ✓ {_line(result.tagged_target)}")
 
     if result.tagged_deps:
-        print(f"\nTagged dependencies ({len(result.tagged_deps)}):")
+        _out(f"\nTagged dependencies ({len(result.tagged_deps)}):")
         for nvr in result.tagged_deps:
-            print(f"  ✓ {nvr}")
+            _out(f"  ✓ {_line(nvr)}")
 
     if result.toolchains:
-        print(f"\nLanguages / Toolchains detected: {', '.join(result.toolchains)}")
+        _out(f"\nLanguages / Toolchains detected: {', '.join(result.toolchains)}")
 
     if result.built_packages:
-        print("\nSuccessfully built:")
+        _out("\nSuccessfully built:")
         for pkg in result.built_packages:
-            print(f"  ✓ {pkg}")
+            _out(f"  ✓ {_line(pkg)}")
 
     if result.already_built:
-        print("\nAlready built, nothing submitted:")
+        _out("\nAlready built, nothing submitted:")
         for pkg in result.already_built:
-            print(f"  = {pkg}")
+            _out(f"  = {_line(pkg)}")
 
     if result.failed_packages:
-        print("\nFailed packages:")
+        _out("\nFailed packages:")
         for pkg in result.failed_packages:
-            print(f"  ✗ {pkg}")
+            _out(f"  ✗ {_line(pkg)}")
 
     if result.skipped_packages:
-        print("\nNot built, a dependency failed:")
+        _out("\nNot built, a dependency failed:")
         for pkg in result.skipped_packages:
-            print(f"  - {pkg}")
+            _out(f"  - {_line(pkg)}")
 
     if result.tasks:
-        print("\nBuild tasks:")
+        _out("\nBuild tasks:")
         icons = {
             BuildStatus.COMPLETE: "✓",
             BuildStatus.ALREADY_BUILT: "=",
@@ -296,13 +305,13 @@ def print_build_result(result: BuildResult) -> None:
             BuildStatus.CANCELED: "⊘",
         }
         for task in result.tasks:
-            print(f"  {icons.get(task.status, '?')} {task.package_name}: {task.status.value}")
+            _out(f"  {icons.get(task.status, '?')} {_line(task.package_name)}: {task.status.value}")
             if task.task_id:
-                print(f"      Task ID: {task.task_id}")
+                _out(f"      Task ID: {task.task_id}")
             if task.error_message:
-                print(f"      Error: {task.error_message[:300]}")
+                _out(f"      Error: {_line(task.error_message)[:300]}")
 
-    print("=" * 60)
+    _out("=" * 60)
 
 
 def resolve_target_tags(
@@ -348,20 +357,20 @@ def ensure_srpm_path(opts: argparse.Namespace, srpm_arg: str, release: str) -> s
 
 def cmd_analyze(opts: argparse.Namespace, srpm_path: str, target: str | None) -> int:
     """Analyze SRPM dependencies the same way a build would, without downloading or building."""
-    print(f"Analyzing: {srpm_path}")
+    _out(f"Analyzing: {srpm_path}")
 
     try:
         package_info = get_package_info_from_srpm(srpm_path)
-        print(f"\nPackage: {package_info.name}")
-        print(f"Version: {package_info.version}")
-        print(f"Release: {package_info.release}")
-        print(f"NVR: {package_info.nvr}")
+        _out(f"\nPackage: {_line(package_info.name)}")
+        _out(f"Version: {_line(package_info.version)}")
+        _out(f"Release: {_line(package_info.release)}")
+        _out(f"NVR: {_line(package_info.nvr)}")
 
-        print(f"\nBuildRequires ({len(package_info.build_requires)}):")
+        _out(f"\nBuildRequires ({len(package_info.build_requires)}):")
         for req in package_info.build_requires:
-            print(f"  - {req}")
+            _out(f"  - {_line(req)}")
 
-        print("\nChecking availability in Koji...")
+        _out("\nChecking availability in Koji...")
         koji_client = KojiClient(
             server=opts.server, serverca=opts.serverca, no_ssl_verify=opts.no_ssl_verify
         )
@@ -370,7 +379,7 @@ def cmd_analyze(opts: argparse.Namespace, srpm_path: str, target: str | None) ->
             if not target:
                 raise VibeBuildError("No build tag: pass --build-tag or a target")
             build_tag, _ = resolve_target_tags(koji_client, target)
-        print(f"Build tag: {build_tag}")
+        _out(f"Build tag: {build_tag}")
 
         resolver = DependencyResolver(
             koji_client=koji_client,
@@ -381,11 +390,11 @@ def cmd_analyze(opts: argparse.Namespace, srpm_path: str, target: str | None) ->
         missing = resolver.find_missing_deps(package_info.build_requires)
 
         if missing:
-            print(f"\nMissing dependencies ({len(missing)}):")
+            _out(f"\nMissing dependencies ({len(missing)}):")
             for dep in missing:
-                print(f"  ✗ {dep}")
+                _out(f"  ✗ {_line(dep)}")
         else:
-            print("\n✓ All dependencies available")
+            _out("\n✓ All dependencies available")
         return 0
 
     except Exception as e:
@@ -395,7 +404,7 @@ def cmd_analyze(opts: argparse.Namespace, srpm_path: str, target: str | None) ->
 
 def cmd_download(opts: argparse.Namespace, package_name: str, release: str) -> int:
     """Download SRPM from Fedora."""
-    print(f"Downloading SRPM for: {package_name}")
+    _out(f"Downloading SRPM for: {package_name}")
     try:
         fetcher = SRPMFetcher(
             download_dir=opts.download_dir,
@@ -406,7 +415,7 @@ def cmd_download(opts: argparse.Namespace, package_name: str, release: str) -> i
     except Exception as e:
         logging.error("Download failed: %s", e)
         return 1
-    print(f"✓ Downloaded: {srpm_path}")
+    _out(f"✓ Downloaded: {srpm_path}")
     return 0
 
 
@@ -446,19 +455,19 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
 
     try:
         if opts.dry_run:
-            print("DRY RUN - showing what would be built:\n")
+            _out("DRY RUN - showing what would be built:\n")
             info = get_package_info_from_srpm(srpm_path)
             nvr = info.nvr
-            print(f"Target package: {nvr}")
+            _out(f"Target package: {_line(nvr)}")
             if not opts.no_deps:
                 build_chain = builder.resolve_build_chain(srpm_path)
                 if build_chain:
-                    print(f"\nDependencies to build ({sum(len(lvl) for lvl in build_chain)}):")
+                    _out(f"\nDependencies to build ({sum(len(lvl) for lvl in build_chain)}):")
                     for level_idx, level in enumerate(build_chain):
-                        print(f"  Level {level_idx + 1}: {', '.join(level)}")
-                    print(f"Then: {nvr}")
+                        _out(f"  Level {level_idx + 1}: {_line(', '.join(level))}")
+                    _out(f"Then: {_line(nvr)}")
                 else:
-                    print(
+                    _out(
                         f"\nNo dependencies to build: all {len(info.build_requires)} "
                         "BuildRequires are available (--analyze-only lists them)"
                     )
@@ -523,12 +532,12 @@ def _train_subcommand(argv: list[str]) -> int:
         logging.error("Training failed: %s", exc)
         return 1
 
-    print(f"Train: {metrics['train_size']}, Test: {metrics['test_size']}")
+    _out(f"Train: {metrics['train_size']}, Test: {metrics['test_size']}")
     if "predicted" in metrics:
-        print(f"Coverage: {metrics['coverage'] * 100:.1f}%")
-        print(f"RPM accuracy: {metrics['rpm_accuracy'] * 100:.1f}%")
-        print(f"SRPM accuracy: {metrics['srpm_accuracy'] * 100:.1f}%")
-    print(f"Model: {opts.output}")
+        _out(f"Coverage: {metrics['coverage'] * 100:.1f}%")
+        _out(f"RPM accuracy: {metrics['rpm_accuracy'] * 100:.1f}%")
+        _out(f"SRPM accuracy: {metrics['srpm_accuracy'] * 100:.1f}%")
+    _out(f"Model: {opts.output}")
     return 0
 
 
