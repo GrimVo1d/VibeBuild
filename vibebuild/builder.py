@@ -580,17 +580,25 @@ class KojiBuilder:
         return detect_toolchains(names)
 
     def _populate_tagged_builds(self, result: BuildResult, target_name: str) -> None:
-        """Report which of the built packages are now the latest in the destination tag."""
+        """Report which packages built in this run are now the latest in the destination tag.
+
+        Already built packages are not listed: this run did not tag them. Neither is a
+        target still building with nowait: the tag holds its previous build.
+        """
         try:
             tagged = self.koji_client.list_tagged_builds(self.dest_tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("list-tagged for %s failed: %s", self.dest_tag, exc)
             return
-        result.tagged_target = None if self.scratch else tagged.get(target_name)
-        done = result.built_packages + result.already_built
-        if target_name in done and not result.tagged_target and not self.scratch:
-            logger.warning("target %s built, but not found in tag %s", target_name, self.dest_tag)
-        for pkg in done:
+        complete = {t.package_name for t in result.tasks if t.status == BuildStatus.COMPLETE}
+        built = [pkg for pkg in result.built_packages if pkg in complete]
+        if target_name in built and not self.scratch:
+            result.tagged_target = tagged.get(target_name)
+            if not result.tagged_target:
+                logger.warning(
+                    "target %s built, but not found in tag %s", target_name, self.dest_tag
+                )
+        for pkg in built:
             if pkg == target_name:
                 continue
             nvr = tagged.get(pkg)

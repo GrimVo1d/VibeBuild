@@ -91,7 +91,7 @@ Other options:
 
 `vibebuild --help` lists all of them.
 
-After a build VibeBuild prints a summary: the tagged target and dependencies, the toolchains found in the BuildRequires, and every task with its status (`✓` built, `=` already built, `✗` failed, with the reason Koji gives). A target left unbuilt because a dependency failed is listed separately.
+After a build VibeBuild prints a summary: how many packages were built, already built or failed, what this run built and tagged, the toolchains found in the BuildRequires, and every task with its status (`✓` built, `=` already built, `✗` failed, with the reason Koji gives). Already built packages are listed apart: nothing was submitted for them. A target left unbuilt because a dependency failed is listed separately. When a dry run finds nothing to build, it says how many BuildRequires are already available.
 
 Exit codes: `0` on success, `1` when a build fails or Koji, the SRPM or the download is not usable, `2` on invalid arguments.
 

@@ -1145,6 +1145,36 @@ class TestScratchOnlyForTarget:
         assert "not found in tag" not in caplog.text
         assert result.tagged_target is None
 
+    def test_already_built_packages_are_not_reported_as_tagged(self, caplog):
+        builder = make_builder()
+        result = BuildResult(
+            success=True,
+            built_packages=["dep"],
+            already_built=["main", "old"],
+            tasks=[BuildTask("dep", "/p", "t", status=BuildStatus.COMPLETE)],
+        )
+        tagged = {"main": "main-1.0-1", "old": "old-2.0-1", "dep": "dep-1.0-1"}
+
+        with patch.object(builder.koji_client, "list_tagged_builds", return_value=tagged):
+            builder._populate_tagged_builds(result, "main")
+
+        assert result.tagged_target is None
+        assert result.tagged_deps == ["dep-1.0-1"]
+        assert "not found in tag" not in caplog.text
+
+    def test_nowait_target_still_building_is_not_reported_as_tagged(self, caplog):
+        builder = make_builder(nowait=True)
+        task = BuildTask("main", "/p", "t", task_id=1, status=BuildStatus.BUILDING)
+        result = BuildResult(success=True, built_packages=["main"], tasks=[task])
+
+        with patch.object(
+            builder.koji_client, "list_tagged_builds", return_value={"main": "main-0.9-1"}
+        ):
+            builder._populate_tagged_builds(result, "main")
+
+        assert result.tagged_target is None
+        assert "not found in tag" not in caplog.text
+
 
 def _info(name="test-pkg"):
     return PackageInfo(name=name, version="1.0", release="1", build_requires=[], source_urls=[])
