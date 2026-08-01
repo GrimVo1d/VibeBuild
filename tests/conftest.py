@@ -83,7 +83,10 @@ def mock_koji_client():
 
 @pytest.fixture
 def mock_subprocess_run(mocker):
-    """Mock subprocess.run for testing."""
+    """Mock subprocess.run for testing; rpm is not wrapped in bwrap even where it exists."""
+    mocker.patch(
+        "vibebuild.analyzer.sandbox_if_available", side_effect=lambda cmd, ro_paths=(): cmd
+    )
     mock = mocker.patch("subprocess.run")
     mock.return_value.returncode = 0
     mock.return_value.stdout = ""

@@ -27,6 +27,7 @@ from vibebuild.spec_patcher import (
     cleanup_patched,
     patch_spec_text,
     patch_srpm,
+    sandbox_if_available,
 )
 
 FULL_SPEC = """\
@@ -205,6 +206,7 @@ def fake_rpm2archive(monkeypatch):
         return real_popen(["cat"], **kwargs)
 
     monkeypatch.setattr(spec_patcher.subprocess, "Popen", popen)
+    monkeypatch.setattr(spec_patcher, "sandbox_if_available", lambda cmd, ro_paths=(): cmd)
 
 
 class TestExtractSrpm:
@@ -261,6 +263,24 @@ class TestExtractSrpm:
         with pytest.raises(VibeBuildError, match="Cannot extract"):
             _extract_srpm(srpm, dest, timeout=30)
 
+    def test_lots_of_rpm2archive_errors_do_not_stall_it(self, tmp_path, monkeypatch):
+        # Far more stderr than a pipe holds, written before the archive
+        real_popen = subprocess.Popen
+        script = "head -c 300000 /dev/zero | tr '\\0' w >&2; cat"
+        monkeypatch.setattr(
+            spec_patcher.subprocess,
+            "Popen",
+            lambda cmd, **kw: real_popen(["sh", "-c", script], **kw),
+        )
+        srpm = tmp_path / "foo.src.rpm"
+        srpm.write_bytes(_tgz({"foo.spec": b"Name: foo"}))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        _extract_srpm(srpm, dest, timeout=10)
+
+        assert (dest / "foo.spec").read_bytes() == b"Name: foo"
+
     def test_hanging_rpm2archive_times_out(self, tmp_path, monkeypatch):
         real_popen = subprocess.Popen
         monkeypatch.setattr(
@@ -308,12 +328,29 @@ class TestSandboxed:
         i = cmd.index("--bind")
         assert cmd[i + 1 : i + 3] == [str(tmp_path), str(tmp_path)]
 
+    def test_read_only_sandbox_for_rpm(self, tmp_path, probe):
+        srpm = tmp_path / "foo.src.rpm"
+
+        cmd = sandbox_if_available(["rpm", "-qp", str(srpm)], [srpm])
+
+        assert cmd[0] == "/usr/bin/bwrap"
+        assert "--bind" not in cmd
+        i = cmd.index("--ro-bind", cmd.index("--tmpfs"))
+        assert cmd[i + 1 : i + 3] == [str(srpm), str(srpm)]
+        assert cmd[cmd.index("HOME") + 1] == "/tmp"
+        assert cmd[-3:] == ["rpm", "-qp", str(srpm)]
+
+    def test_without_bwrap_rpm_runs_as_is(self):
+        with patch("vibebuild.spec_patcher.shutil.which", return_value=None):
+            assert sandbox_if_available(["rpm2archive", "-"]) == ["rpm2archive", "-"]
+
     def test_probe_uses_the_full_sandbox(self, tmp_path, probe):
         _sandboxed(["rpmbuild"], tmp_path)
 
         argv = probe.call_args.args[0]
         assert argv[-1] == "true"
         assert "--proc" in argv and "--cap-drop" in argv
+        assert probe.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
     def test_bwrap_is_probed_once(self, tmp_path, probe):
         _sandboxed(["a"], tmp_path)
@@ -399,6 +436,8 @@ class TestPatchSrpm:
 
     def test_rebuilds_patched_srpm_in_temp_dir(self, srpm, extract, rpmbuild):
         patched = Path(patch_srpm(str(srpm), add_unpackaged_macro=True))
+        # The spec's shell must not get the user's terminal
+        assert rpmbuild.call_args.kwargs["stdin"] == subprocess.DEVNULL
         try:
             assert patched.parent.name.startswith("vibebuild-patch-")
             assert patched.read_bytes() == b"patched"
@@ -408,6 +447,19 @@ class TestPatchSrpm:
         finally:
             cleanup_patched(str(patched))
         assert not patched.parent.exists()
+
+    def test_symlinked_output_is_not_taken(self, srpm, extract, rpmbuild, tmp_path):
+        secret = tmp_path / "secret"
+        secret.write_text("host file")
+
+        def fake(cmd, **kwargs):
+            topdir = Path(cmd[cmd.index("--define") + 1].removeprefix("_topdir "))
+            (topdir / "foo-1.0-1.src.rpm").symlink_to(secret)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        rpmbuild.side_effect = fake
+        with pytest.raises(VibeBuildError, match="produced no SRPM"):
+            patch_srpm(str(srpm))
 
     def test_rpmbuild_failure_leaves_nothing(self, srpm, extract, rpmbuild, tmp_path):
         rpmbuild.side_effect = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "bad")

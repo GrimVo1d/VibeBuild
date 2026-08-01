@@ -188,7 +188,9 @@ def _decompressed(path: Path) -> Iterator[IO[bytes]]:
                 raise VibeBuildError("zstd metadata needs Python 3.14 or the zstd tool") from None
             # List argv without a shell; zstd was found in PATH above
             argv = ["zstd", "-d", "-c", str(path)]
-            with subprocess.Popen(argv, stdout=subprocess.PIPE) as proc:  # nosec B603
+            with subprocess.Popen(  # nosec B603
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE
+            ) as proc:
                 stdout = cast(IO[bytes], proc.stdout)  # stdout=PIPE, never None
                 yield stdout
                 stdout.close()

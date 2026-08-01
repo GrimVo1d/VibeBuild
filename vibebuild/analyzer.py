@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibebuild.exceptions import InvalidSRPMError, SRPMNotFoundError
+from vibebuild.spec_patcher import sandbox_if_available
 
 
 @dataclass
@@ -73,8 +74,10 @@ def get_package_info_from_srpm(srpm_path: str) -> PackageInfo:
     path = _check_srpm_path(srpm_path)
     try:
         # List argv without a shell; rpm is looked up in PATH like any rpm tool
+        # rpm parses an untrusted file: in the sandbox where bwrap works
         result = subprocess.run(  # nosec B603 B607
-            ["rpm", "-qp", "--qf", _HEADER_QUERY, str(path)],
+            sandbox_if_available(["rpm", "-qp", "--qf", _HEADER_QUERY, str(path)], [path]),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=60,

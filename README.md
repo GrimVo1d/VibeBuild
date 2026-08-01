@@ -16,7 +16,7 @@ A command-line tool that builds an RPM package in Koji together with the build d
 
 - Python 3.12 or newer, Linux.
 - `rpm` to read SRPM headers, and the Koji Python library (`python3-koji` on Fedora).
-- `rpmbuild` and `bwrap` (bubblewrap) for `--patch-specs`; Python 3.12.11+ or 3.13.4+ there, older releases have `tarfile` filter bypasses.
+- `rpmbuild` and `bwrap` (bubblewrap) for `--patch-specs`; Python 3.12.11+ or 3.13.4+ there, older releases have `tarfile` filter bypasses. Where bwrap works, `rpm` also reads every SRPM inside it.
 - A Koji hub you can build on, with a client certificate. Fedora Koji is used anonymously, to download SRPMs.
 
 ## Installation

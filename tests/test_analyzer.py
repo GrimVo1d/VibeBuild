@@ -1,5 +1,7 @@
 """Tests for vibebuild.analyzer module."""
 
+import subprocess
+
 import pytest
 
 from vibebuild.analyzer import (
@@ -82,6 +84,19 @@ class TestGetPackageInfoFromSrpm:
         argv = mock_subprocess_run.call_args.args[0]
         assert argv[:3] == ["rpm", "-qp", "--qf"]
         assert argv[-1] == str(srpm.resolve())
+        assert mock_subprocess_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
+
+    def test_rpm_reads_the_srpm_in_the_sandbox(self, srpm, mock_subprocess_run, mocker):
+        mock_subprocess_run.return_value.stdout = _header("x", "1", "1")
+        wrap = mocker.patch(
+            "vibebuild.analyzer.sandbox_if_available",
+            side_effect=lambda cmd, ro_paths=(): ["bwrap", *cmd],
+        )
+
+        get_package_info_from_srpm(str(srpm))
+
+        assert wrap.call_args.args[1] == [srpm.resolve()]
+        assert mock_subprocess_run.call_args.args[0][:2] == ["bwrap", "rpm"]
 
     def test_relative_path_is_passed_absolute(self, tmp_path, monkeypatch, mock_subprocess_run):
         monkeypatch.chdir(tmp_path)
@@ -144,8 +159,6 @@ class TestGetPackageInfoFromSrpm:
             get_package_info_from_srpm(str(srpm))
 
     def test_rpm_timeout(self, srpm, mock_subprocess_run):
-        import subprocess
-
         mock_subprocess_run.side_effect = subprocess.TimeoutExpired(cmd="rpm", timeout=60)
         with pytest.raises(InvalidSRPMError, match="timed out"):
             get_package_info_from_srpm(str(srpm))

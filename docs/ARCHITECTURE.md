@@ -132,6 +132,8 @@ Downloads land in `~/.cache/vibebuild/srpms` (`$XDG_CACHE_HOME`, `--download-dir
 
 `--patch-specs` rebuilds SRPMs before submitting them. `spec_patcher` unpacks the SRPM with `rpm2archive` and Python's `tarfile` data filter, capped at 8 GiB, removes the `%check` section, optionally adds the unpackaged-files macro, and runs `rpmbuild -bs`. Parsing a spec executes its `%(...)` and `%{lua:...}` macros, so `rpmbuild` runs under bubblewrap: no network, no capabilities, a cleared environment, a read-only `/usr`, no `$HOME`, only the work directory writable. Before a build with `--patch-specs` starts, VibeBuild checks that bwrap can create a sandbox and that Python's `tarfile` filter has no known bypasses (3.12.11+, 3.13.4+), and stops otherwise; `--allow-unsandboxed` lets `rpmbuild` run without bwrap, with a warning. That is why the option is off by default; without it SRPMs go to Koji untouched.
 
+Reading an SRPM runs rpm's header and payload parsers on an untrusted file: `rpm -qp` for the header and `rpm2archive` for the payload. Where bwrap works, both run in the same sandbox, read-only, with only the SRPM bound in, so a parser bug does not reach the user's files or Koji certificate. Without bwrap they run as they are: analysing an SRPM does not require a sandbox.
+
 ## ML resolver
 
 `MLPackageResolver` maps a dependency string to an RPM and an SRPM name by similarity to provides it has seen.

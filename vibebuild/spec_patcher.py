@@ -30,7 +30,7 @@ import sys
 import tarfile
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from vibebuild.exceptions import SRPMNotFoundError, VibeBuildError
@@ -141,10 +141,15 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
     unpack to at most MAX_PAYLOAD_BYTES.
     """
     _check_tarfile_filter()
-    with srpm.open("rb") as src:
+    # stderr goes to a file: nobody reads a pipe while tarfile reads stdout, and a full
+    # pipe would stall rpm2archive
+    with srpm.open("rb") as src, tempfile.TemporaryFile() as errors:
         # List argv without a shell; rpm2archive is looked up in PATH
         proc = subprocess.Popen(  # nosec B603 B607
-            ["rpm2archive", "-"], stdin=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            sandbox_if_available(["rpm2archive", "-"]),
+            stdin=src,
+            stdout=subprocess.PIPE,
+            stderr=errors,
         )
         # The timeout covers the extraction too: killing rpm2archive ends the stream
         # tarfile is blocked on
@@ -161,7 +166,7 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
                 # _size_limited wraps tarfile.data_filter, which bandit does not see through
                 size_limited = _size_limited(MAX_PAYLOAD_BYTES)
                 archive.extractall(dest, filter=size_limited)  # nosec B202
-            _, err = proc.communicate(timeout=timeout)
+            proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}") from exc
         except (tarfile.TarError, OSError) as exc:
@@ -174,6 +179,8 @@ def _extract_srpm(srpm: Path, dest: Path, timeout: int) -> None:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+        errors.seek(0)
+        err = errors.read(64 * 1024)
     if timed_out.is_set():
         raise VibeBuildError(f"rpm2archive timed out extracting {srpm.name}")
     if proc.returncode != 0:
@@ -213,6 +220,7 @@ def _bwrap() -> tuple[str | None, str]:
             # List argv without a shell; bwrap is the absolute path from shutil.which
             probe = subprocess.run(  # nosec B603
                 _sandbox_argv(bwrap, Path(work_dir)) + ["true"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -264,10 +272,30 @@ def _sandboxed(cmd: list[str], work_dir: Path, allow_unsandboxed: bool = False) 
     return _sandbox_argv(bwrap, work_dir) + cmd
 
 
-def _sandbox_argv(bwrap: str, work_dir: Path) -> list[str]:
-    """bwrap's argv up to the command it runs."""
+def sandbox_if_available(cmd: list[str], ro_paths: Sequence[Path] = ()) -> list[str]:
+    """Wrap a command that only reads ro_paths in the sandbox, where bwrap works.
+
+    rpm's header and payload parsers read untrusted SRPMs; in the sandbox a parser bug
+    cannot reach the user's files or Koji certificate. Without a working bwrap the
+    command runs as is: reading an SRPM must not need one.
+    """
+    bwrap, _ = _bwrap()
+    if not bwrap:
+        return cmd
+    return _sandbox_argv(bwrap, None, ro_paths) + cmd
+
+
+def _sandbox_argv(bwrap: str, work_dir: Path | None, ro_paths: Sequence[Path] = ()) -> list[str]:
+    """bwrap's argv up to the command it runs; work_dir is the only writable host path."""
     # A fresh tmpfs inside the sandbox, not the host /tmp
     sandbox_tmp = "/tmp"  # nosec B108
+    if work_dir:
+        binds = ["--bind", str(work_dir), str(work_dir)]
+        home = str(work_dir)
+    else:
+        binds, home = [], sandbox_tmp
+    for path in ro_paths:
+        binds += ["--ro-bind", str(path), str(path)]
     return [
         bwrap,
         "--unshare-all",
@@ -288,9 +316,9 @@ def _sandbox_argv(bwrap: str, work_dir: Path) -> list[str]:
         "--proc", "/proc",
         "--dev", "/dev",
         "--tmpfs", sandbox_tmp,
-        "--bind", str(work_dir), str(work_dir),
-        "--setenv", "HOME", str(work_dir),
-        "--chdir", str(work_dir),
+        *binds,
+        "--setenv", "HOME", home,
+        "--chdir", home,
     ]  # fmt: skip
 
 
@@ -370,9 +398,11 @@ def _patch_into(
         str(spec_dst),
     ]
     try:
-        # List argv without a shell; the spec is parsed inside bwrap
+        # List argv without a shell; the spec is parsed inside bwrap. No stdin: the
+        # spec's shell would otherwise get the user's terminal
         result = subprocess.run(  # nosec B603
             _sandboxed(cmd, target, allow_unsandboxed),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -384,7 +414,9 @@ def _patch_into(
             f"rpmbuild -bs failed for {srpm.name}: {result.stderr.strip() or result.stdout.strip()}"
         )
 
-    new_srpms = sorted(target.glob("*.src.rpm"))
+    # The spec wrote this directory: take only a regular file, never a symlink to a host
+    # path or a FIFO
+    new_srpms = sorted(p for p in target.glob("*.src.rpm") if p.is_file() and not p.is_symlink())
     if not new_srpms:
         raise VibeBuildError(f"rpmbuild produced no SRPM for {srpm.name}")
 
