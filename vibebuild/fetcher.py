@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import struct
 import tempfile
 from pathlib import Path
@@ -41,6 +42,22 @@ def default_download_dir() -> Path:
     """Per-user SRPM cache: $XDG_CACHE_HOME/vibebuild/srpms (~/.cache by default)."""
     cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(cache) / "vibebuild" / "srpms"
+
+
+def _check_private_dir(path: Path) -> None:
+    """Refuse a download dir someone else could write to.
+
+    An SRPM is checked against Koji's digest and then read again by path for the
+    upload, so another user able to swap files in between could get their SRPM
+    built with this user's certificate. The user's own private group may write
+    (umask 002 on Fedora).
+    """
+    st = path.stat()
+    shared_group = st.st_mode & stat.S_IWGRP and st.st_gid != os.getgid()
+    if st.st_uid != os.getuid() or st.st_mode & stat.S_IWOTH or shared_group:
+        raise VibeBuildError(
+            f"Download dir {path} must be owned by you and not writable by other users"
+        )
 
 
 _RPM_LEAD_MAGIC = b"\xed\xab\xee\xdb"
@@ -86,6 +103,7 @@ class SRPMFetcher:
         else:
             self.download_dir = default_download_dir()
             self.download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _check_private_dir(self.download_dir)
         self.fedora_release = fedora_release
         self.name_resolver = name_resolver
         self.koji_server = koji_server

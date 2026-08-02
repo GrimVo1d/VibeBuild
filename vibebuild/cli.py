@@ -434,26 +434,25 @@ def cmd_build(opts: argparse.Namespace, target: str, srpm_path: str, release: st
         logging.error("%s", e)
         return 1
 
-    builder = KojiBuilder(
-        koji_server=opts.server,
-        target=target,
-        build_tag=build_tag,
-        dest_tag=dest_tag,
-        cert=opts.cert,
-        serverca=opts.serverca,
-        no_ssl_verify=opts.no_ssl_verify,
-        scratch=opts.scratch,
-        nowait=opts.nowait,
-        build_all_deps=opts.build_all_deps,
-        patch_specs=opts.patch_specs,
-        allow_unsandboxed=opts.allow_unsandboxed,
-        max_deps=opts.max_deps,
-        name_resolver=name_resolver_for(opts),
-        download_dir=opts.download_dir,
-        fedora_release=release,
-    )
-
     try:
+        builder = KojiBuilder(
+            koji_server=opts.server,
+            target=target,
+            build_tag=build_tag,
+            dest_tag=dest_tag,
+            cert=opts.cert,
+            serverca=opts.serverca,
+            no_ssl_verify=opts.no_ssl_verify,
+            scratch=opts.scratch,
+            nowait=opts.nowait,
+            build_all_deps=opts.build_all_deps,
+            patch_specs=opts.patch_specs,
+            allow_unsandboxed=opts.allow_unsandboxed,
+            max_deps=opts.max_deps,
+            name_resolver=name_resolver_for(opts),
+            download_dir=opts.download_dir,
+            fedora_release=release,
+        )
         if opts.dry_run:
             _out("DRY RUN - showing what would be built:\n")
             info = get_package_info_from_srpm(srpm_path)

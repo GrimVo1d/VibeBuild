@@ -1,6 +1,7 @@
 """Tests for vibebuild.fetcher module."""
 
 import hashlib
+import os
 import stat
 import struct
 from unittest.mock import MagicMock
@@ -69,6 +70,27 @@ class TestDownloadDir:
         f = SRPMFetcher(download_dir=str(tmp_path / "a" / "b"))
 
         assert f.download_dir.is_dir()
+
+    def test_world_writable_dir_is_refused(self, tmp_path):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+
+        with pytest.raises(VibeBuildError, match="not writable by other users"):
+            SRPMFetcher(download_dir=str(shared))
+
+    def test_dir_of_another_user_is_refused(self, tmp_path, monkeypatch):
+        other_uid = os.getuid() + 1
+        monkeypatch.setattr(fetcher.os, "getuid", lambda: other_uid)
+
+        with pytest.raises(VibeBuildError, match="must be owned by you"):
+            SRPMFetcher(download_dir=str(tmp_path))
+
+    def test_own_group_may_write(self, tmp_path, monkeypatch):
+        tmp_path.chmod(0o775)
+        monkeypatch.setattr(fetcher.os, "getgid", lambda: tmp_path.stat().st_gid)
+
+        assert SRPMFetcher(download_dir=str(tmp_path)).download_dir == tmp_path
 
 
 class TestDownloadSrpm:

@@ -514,6 +514,17 @@ class TestCmdBuild:
             assert cmd_build(make_opts(), "f44", str(srpm), "44") == 1
 
 
+def test_unusable_download_dir_is_an_error_not_a_traceback(srpm, caplog):
+    with (
+        patch("vibebuild.cli.resolve_target_tags", return_value=("f44-build", "f44")),
+        patch("vibebuild.cli.KojiClient"),
+        patch("vibebuild.cli.KojiBuilder", side_effect=VibeBuildError("Download dir /x is shared")),
+    ):
+        assert cmd_build(make_opts(), "f44", str(srpm), "44") == 1
+
+    assert "Download dir /x is shared" in caplog.text
+
+
 class TestDryRun:
     def test_with_dependencies(self, srpm, capsys):
         with (
