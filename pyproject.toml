@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.32.4",
+    "urllib3>=2.6.0",  # bounded decompression of mirror responses (CVE-2025-66418, CVE-2025-66471)
 ]
 
 [project.optional-dependencies]
