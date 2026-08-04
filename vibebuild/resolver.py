@@ -314,6 +314,11 @@ class DependencyResolver:
 
         return missing
 
+    def _has_build(self, name: str) -> bool:
+        """True if the dependency name (as the graph walk resolves it) has a build in the tag."""
+        resolved = self.name_resolver.resolve(name) if self.name_resolver else name
+        return self.koji.package_exists(resolved, self.koji_tag)
+
     def build_dependency_graph(
         self, root_package: str, srpm_path: str, srpm_resolver: Callable | None = None
     ) -> dict[str, DependencyNode]:
@@ -370,6 +375,19 @@ class DependencyResolver:
                 try:
                     requires = get_build_requires(pkg_srpm)
                     missing = self.find_missing_deps(requires)
+                    # A dependency with a build in the tag is never rebuilt, even when
+                    # its version does not satisfy the constraint: a Fedora build could
+                    # roll the tag back or shadow a local one. Say so, do not download it.
+                    for dep in [d for d in missing if self._has_build(d)]:
+                        logger.warning(
+                            "%s: the build in %s does not satisfy %s's BuildRequires; "
+                            "VibeBuild does not replace existing builds, so %s may fail",
+                            dep,
+                            self.koji_tag,
+                            resolved_name,
+                            resolved_name,
+                        )
+                        missing.remove(dep)
                     node.dependencies = missing
 
                     # Download SRPMs for all new missing deps in parallel,

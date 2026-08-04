@@ -580,6 +580,28 @@ class TestVersionConstraints:
         assert "python3-cffi" in resolver.find_missing_deps([dep])
 
 
+class TestUnsatisfiedConstraintWithBuild:
+    def test_existing_build_is_not_downloaded_or_rebuilt(self, mock_koji_client, caplog):
+        # openssl >= 999: the tag has 3.0, Fedora is not asked for a "newer" one
+        mock_koji_client.list_packages.return_value = ["openssl"]
+        mock_koji_client.package_exists.side_effect = lambda p, t: p == "openssl"
+        mock_koji_client.latest_build.return_value = {
+            "nvr": "openssl-3.0-1",
+            "version": "3.0",
+            "release": "1",
+        }
+        resolver = DependencyResolver(koji_client=mock_koji_client, koji_tag="f44-build")
+        fetch = Mock(return_value="/srpms/openssl.src.rpm")
+        requires = [BuildRequirement(name="openssl", operator=">=", version="999")]
+
+        with patch("vibebuild.resolver.get_build_requires", return_value=requires):
+            resolver.build_dependency_graph("root", "/root.src.rpm", srpm_resolver=fetch)
+
+        fetch.assert_not_called()
+        assert resolver.get_build_chain() == []
+        assert "does not replace existing builds" in caplog.text
+
+
 class TestFindMissingDepsPrefetch:
     def test_prefetches_all_candidates_once(self, mock_koji_client):
         mock_nr = Mock()
