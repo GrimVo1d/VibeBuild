@@ -5,6 +5,7 @@ COMPOSE = docker compose
 .env:
 	@cp .env.default .env
 	@printf 'POSTGRES_PASSWORD=%s\nKOJIWEB_SECRET=%s\n' "$$(openssl rand -hex 16)" "$$(openssl rand -hex 32)" >> .env
+	@printf 'VB_UID=%s\n' "$$(id -u)" >> .env
 	@chmod 600 .env
 	@echo "Created .env from .env.default with generated secrets"
 

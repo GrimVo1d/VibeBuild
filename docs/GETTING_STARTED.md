@@ -179,7 +179,7 @@ koji list-tasks          # wait until the newRepo task is closed
 koji list-targets
 ```
 
-The client container has VibeBuild installed from your working tree and a `~/.koji/config` with the admin certificate and `target = f44`. The rest of this section runs inside it.
+The client container runs VibeBuild from your working tree, mounted read-only, as an ordinary user with a `~/.koji/config` that names the admin certificate and `target = f44`. The rest of this section runs inside it.
 
 ### Step 2. Look before building
 

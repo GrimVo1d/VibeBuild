@@ -1,23 +1,35 @@
 ARG FEDORA_VERSION=44
 FROM fedora:${FEDORA_VERSION}
 
-# Build/runtime tools for vibebuild and its dependencies
+# Runtime and test tools; vibebuild itself runs from the read-only /workspace mount
 RUN dnf install -y \
-        python3 python3-pip python3-devel \
-        python3-setuptools python3-wheel \
+        python3 python3-requests python3-pytest python3-pytest-cov python3-pytest-mock \
         rpm rpm-build rpmdevtools bubblewrap \
         koji \
-        gcc gcc-c++ make \
         git curl jq which findutils less procps-ng \
         python3-scikit-learn python3-numpy python3-scipy \
     && dnf clean all
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONDONTWRITEBYTECODE=1
+# The client runs as an ordinary user, not root: whatever escapes rpm or a spec cannot
+# write /proc/sys, which this container leaves unmasked for bubblewrap. VB_UID matches
+# the host user, who owns the mounted certificate.
+ARG VB_UID=1000
+RUN useradd --uid "${VB_UID}" --create-home vibebuild \
+    && mkdir -p /home/vibebuild/.cache/vibebuild /home/vibebuild/.koji \
+    && chown -R vibebuild: /home/vibebuild \
+    && printf '#!/bin/sh\nexec python3 -m vibebuild "$@"\n' > /usr/local/bin/vibebuild \
+    && chmod 755 /usr/local/bin/vibebuild
 
-WORKDIR /workspace
+# Nothing writes into the read-only checkout: no bytecode, no pytest cache, coverage in /tmp
+ENV PYTHONPATH=/workspace \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTEST_ADDOPTS="-p no:cacheprovider" \
+    COVERAGE_FILE=/tmp/.coverage
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+USER vibebuild
+WORKDIR /workspace
 
 CMD ["/entrypoint.sh"]

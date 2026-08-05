@@ -69,20 +69,24 @@ services:
       context: ./vibebuild-dev
       args:
         FEDORA_VERSION: ${FEDORA_VERSION:-44}
+        VB_UID: ${VB_UID:-1000}
     depends_on:
       koji-hub:
         condition: service_healthy
     volumes:
-      - ../..:/workspace
+      # Read-only: an SRPM under test cannot change the checkout, its .git hooks or
+      # its pre-commit config, which run on the host
+      - ../..:/workspace:ro
       - ./ssl/koji_ca_cert.crt:/etc/pki/koji/koji_ca_cert.crt:ro,Z
       - ./ssl/kojiadmin.pem:/etc/pki/koji/kojiadmin.pem:ro,Z
-      - vibebuild-cache:/root/.cache/vibebuild
+      - vibebuild-srpms:/home/vibebuild/.cache/vibebuild
     environment:
       KOJI_TARGET: ${KOJI_TARGET:-f44}
       KOJI_BUILD_TAG: ${KOJI_BUILD_TAG:-f44-build}
     # Docker's default seccomp profile forbids the user namespaces bwrap needs, and
     # its masked /proc paths stop bwrap from mounting a fresh /proc. Without these
-    # --patch-specs would have to run spec macros unsandboxed, as root.
+    # --patch-specs would have to run spec macros unsandboxed. The client runs as an
+    # ordinary user, so the unmasked /proc/sys stays read-only to it.
     security_opt:
       - seccomp:unconfined
       - systempaths=unconfined
@@ -93,7 +97,7 @@ services:
 volumes:
   koji-db-data:
   koji-data:
-  vibebuild-cache:
+  vibebuild-srpms:
 
 networks:
   koji-net:

@@ -112,7 +112,7 @@ Training data come from the Fedora Everything repodata, checked by sha256 throug
 
 ## Local Koji stand
 
-`dev/koji-server` runs a complete Koji in Docker: PostgreSQL, hub with the web UI, a builder with mock, and a client container with VibeBuild installed from the working tree. The build tag gets the Fedora release and updates repos as external repos.
+`dev/koji-server` runs a complete Koji in Docker: PostgreSQL, hub with the web UI, a builder with mock, and a client container that runs VibeBuild straight from the working tree. The build tag gets the Fedora release and updates repos as external repos.
 
 ```bash
 cd dev/koji-server
@@ -123,7 +123,7 @@ vibebuild --dry-run python-requests      # inside the client
 
 The web UI is at <https://localhost:8443/koji> (published on 127.0.0.1 only). The stand has no `kojira`: VibeBuild creates repos itself, and `make regen-repo` does it by hand. The first repo after `make setup` takes a few minutes. `make init` re-runs the hub setup and is safe to repeat, `make stop` stops the containers, `make clean` also removes the volumes, certificates and `.env`. The Fedora release is `FEDORA_VERSION` in `.env`.
 
-Each container mounts only the certificates it uses; the CA key stays on the host. The client container runs with Docker's seccomp profile and `/proc` masking turned off, so bubblewrap can sandbox `--patch-specs` inside it. The hub has e-mail notifications disabled, since the stand has no SMTP server.
+Each container mounts only the certificates it uses; the CA key stays on the host. The client container runs with Docker's seccomp profile and `/proc` masking turned off, so bubblewrap can sandbox rpm and `--patch-specs` inside it; to make up for that it runs as an ordinary user, not root, and mounts the working tree read-only, so an SRPM under test cannot touch the checkout or its git hooks. The hub has e-mail notifications disabled, since the stand has no SMTP server.
 
 ## Deploying Koji
 
