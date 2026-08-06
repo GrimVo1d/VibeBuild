@@ -139,6 +139,8 @@ ansible-playbook -i inventory/hosts.ini playbook.yml
 
 Passwords and secrets are generated on the first run into `ansible/credentials/`, which git ignores. Root on the server gets a `~/.koji/config` with the admin certificate. `kojira` is not installed; VibeBuild regenerates repos itself.
 
+Everything lands on one machine, the builder included. Builds run untrusted SRPMs in mock, and membership in the `mock` group is as good as root, so a build that escapes its chroot reaches the CA key, the admin certificate and the database; the CA can sign a certificate for any user. That is acceptable for a personal Koji. For a shared one, put the builder on its own host and move the CA key off the hub once the certificates are issued.
+
 ## Development
 
 ```bash
