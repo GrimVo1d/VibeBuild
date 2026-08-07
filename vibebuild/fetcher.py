@@ -9,9 +9,11 @@ downloaded file is used only when it is exactly the SRPM Fedora built.
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import logging
 import os
+import pwd
 import re
 import stat
 import struct
@@ -44,20 +46,54 @@ def default_download_dir() -> Path:
     return Path(cache) / "vibebuild" / "srpms"
 
 
+def _private_group(gid: int) -> bool:
+    """gid is the user's own private group (Fedora's default), with nobody else in it."""
+    try:
+        group = grp.getgrgid(gid)
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return False
+    return gid == os.getgid() and group.gr_name == user and set(group.gr_mem) <= {user}
+
+
+def _has_acl(path: Path) -> bool:
+    """path carries a POSIX ACL, whose named entries the group bits do not show."""
+    listxattr = getattr(os, "listxattr", None)  # Linux only
+    if listxattr is None:
+        return False
+    try:
+        return "system.posix_acl_access" in listxattr(path)
+    except OSError:
+        return False
+
+
+def _others_can_write(path: Path, st: os.stat_result) -> bool:
+    if st.st_mode & stat.S_IWOTH:
+        return True
+    return bool(st.st_mode & stat.S_IWGRP) and (not _private_group(st.st_gid) or _has_acl(path))
+
+
 def _check_private_dir(path: Path) -> None:
-    """Refuse a download dir someone else could write to.
+    """Refuse a download dir someone else could write to or swap out.
 
     An SRPM is checked against Koji's digest and then read again by path for the
     upload, so another user able to swap files in between could get their SRPM
     built with this user's certificate. The user's own private group may write
-    (umask 002 on Fedora).
+    (umask 002 on Fedora). A parent someone else can write to would let them rename
+    the dir away and put their own in its place, unless it is sticky like /tmp.
     """
     st = path.stat()
-    shared_group = st.st_mode & stat.S_IWGRP and st.st_gid != os.getgid()
-    if st.st_uid != os.getuid() or st.st_mode & stat.S_IWOTH or shared_group:
+    if st.st_uid != os.getuid() or _others_can_write(path, st):
         raise VibeBuildError(
             f"Download dir {path} must be owned by you and not writable by other users"
         )
+    for parent in path.parents:
+        st = parent.stat()
+        sticky = st.st_mode & stat.S_ISVTX
+        if st.st_uid not in (0, os.getuid()) or (_others_can_write(parent, st) and not sticky):
+            raise VibeBuildError(
+                f"Download dir {path} is inside {parent}, which other users can change"
+            )
 
 
 _RPM_LEAD_MAGIC = b"\xed\xab\xee\xdb"
@@ -103,6 +139,8 @@ class SRPMFetcher:
         else:
             self.download_dir = default_download_dir()
             self.download_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # the checked dir itself, not a symlink that could be pointed elsewhere later
+        self.download_dir = self.download_dir.resolve()
         _check_private_dir(self.download_dir)
         self.fedora_release = fedora_release
         self.name_resolver = name_resolver

@@ -86,11 +86,53 @@ class TestDownloadDir:
         with pytest.raises(VibeBuildError, match="must be owned by you"):
             SRPMFetcher(download_dir=str(tmp_path))
 
-    def test_own_group_may_write(self, tmp_path, monkeypatch):
+    def test_own_private_group_may_write(self, tmp_path, monkeypatch):
         tmp_path.chmod(0o775)
-        monkeypatch.setattr(fetcher.os, "getgid", lambda: tmp_path.stat().st_gid)
+        monkeypatch.setattr(fetcher, "_private_group", lambda gid: True)
 
         assert SRPMFetcher(download_dir=str(tmp_path)).download_dir == tmp_path
+
+    def test_shared_group_is_refused(self, tmp_path, monkeypatch):
+        tmp_path.chmod(0o775)
+        user = fetcher.pwd.getpwuid(os.getuid()).pw_name
+        group = MagicMock(gr_name=user, gr_mem=[user, "bob"])
+        monkeypatch.setattr(fetcher.grp, "getgrgid", lambda gid: group)
+        monkeypatch.setattr(fetcher.os, "getgid", lambda: tmp_path.stat().st_gid)
+
+        with pytest.raises(VibeBuildError, match="not writable by other users"):
+            SRPMFetcher(download_dir=str(tmp_path))
+
+    def test_group_writable_dir_with_an_acl_is_refused(self, tmp_path, monkeypatch):
+        tmp_path.chmod(0o775)
+        monkeypatch.setattr(fetcher, "_private_group", lambda gid: True)
+        monkeypatch.setattr(
+            fetcher.os, "listxattr", lambda p: ["system.posix_acl_access"], raising=False
+        )
+
+        with pytest.raises(VibeBuildError, match="not writable by other users"):
+            SRPMFetcher(download_dir=str(tmp_path))
+
+    def test_symlink_is_resolved_before_the_check(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "link").symlink_to(real)
+
+        assert SRPMFetcher(download_dir=str(tmp_path / "link")).download_dir == real
+
+    def test_parent_writable_by_others_is_refused(self, tmp_path):
+        shared = tmp_path / "shared"
+        (shared / "mine").mkdir(parents=True)
+        shared.chmod(0o777)
+
+        with pytest.raises(VibeBuildError, match="which other users can change"):
+            SRPMFetcher(download_dir=str(shared / "mine"))
+
+    def test_sticky_parent_like_tmp_is_fine(self, tmp_path):
+        shared = tmp_path / "shared"
+        (shared / "mine").mkdir(parents=True)
+        shared.chmod(0o1777)
+
+        assert SRPMFetcher(download_dir=str(shared / "mine")).download_dir == shared / "mine"
 
 
 class TestDownloadSrpm:
