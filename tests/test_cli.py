@@ -9,6 +9,7 @@ from unittest.mock import ANY, patch
 
 import pytest
 
+from vibebuild._logging import clean
 from vibebuild.analyzer import BuildRequirement, PackageInfo
 from vibebuild.builder import BuildResult, BuildStatus, BuildTask
 from vibebuild.cli import (
@@ -193,6 +194,19 @@ class TestSetupLogging:
 
         assert "\x1b" not in line and "\x07" not in line
         assert line.endswith("Build FAILED: ?]0;pwn?")
+
+    def test_text_log_lines_inside_a_message_are_indented(self):
+        setup_logging()
+        record = logging.LogRecord(
+            "x", logging.ERROR, "", 0, "task failed: %s", ("oops\n12:00:00 [INFO] fine",), None
+        )
+
+        line = logging.getLogger().handlers[0].format(record)
+
+        assert line.endswith("task failed: oops\n    12:00:00 [INFO] fine")
+
+    def test_bidi_and_zero_width_marks_are_dropped(self):
+        assert clean("a\u202eb\u200bc\u2066d") == "a?b?c?d"
 
 
 class TestFedoraRelease:

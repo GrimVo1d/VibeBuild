@@ -16,8 +16,9 @@ import re
 from datetime import UTC, datetime
 
 # C0/C1 control characters except tab and newline: an SRPM header or a message
-# from the hub could otherwise send escape sequences to the terminal
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# from the hub could otherwise send escape sequences to the terminal. Zero-width
+# and bidi marks go too, so text cannot hide or reorder what is shown.
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069]")
 
 
 def clean(text: object) -> str:
@@ -26,7 +27,15 @@ def clean(text: object) -> str:
 
 
 class TextFormatter(logging.Formatter):
-    """Plain log lines without terminal control characters."""
+    """Plain log lines without terminal control characters.
+
+    Lines inside a message are indented, so text from an SRPM or the hub cannot pass
+    for a log line of its own.
+    """
+
+    def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802
+        record.message = record.message.replace("\n", "\n    ")
+        return super().formatMessage(record)
 
     def format(self, record: logging.LogRecord) -> str:
         return clean(super().format(record))
