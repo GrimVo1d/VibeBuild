@@ -279,8 +279,9 @@ def sandbox_if_available(cmd: list[str], ro_paths: Sequence[Path] = ()) -> list[
     cannot reach the user's files or Koji certificate. Without a working bwrap the
     command runs as is: reading an SRPM must not need one.
     """
-    bwrap, _ = _bwrap()
+    bwrap, problem = _bwrap()
     if not bwrap:
+        logger.debug("%s: %s runs without a sandbox", problem, cmd[0])
         return cmd
     return _sandbox_argv(bwrap, None, ro_paths) + cmd
 
