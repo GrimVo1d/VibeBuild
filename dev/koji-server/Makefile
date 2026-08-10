@@ -17,6 +17,7 @@ certs: .env
 		'dnf -q -y install openssl >/dev/null && bash scripts/generate-certs.sh && chown -R "$$HOST_UID:$$HOST_GID" ssl'
 
 setup: .env certs
+	@grep -q '^VB_UID=' .env || printf 'VB_UID=%s\n' "$$(id -u)" >> .env
 	$(COMPOSE) up -d --build db koji-hub
 	@echo "Waiting for koji-hub to be healthy..."
 	@timeout=120; while [ $$timeout -gt 0 ]; do \

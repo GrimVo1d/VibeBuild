@@ -80,6 +80,9 @@ services:
       - ./ssl/koji_ca_cert.crt:/etc/pki/koji/koji_ca_cert.crt:ro,Z
       - ./ssl/kojiadmin.pem:/etc/pki/koji/kojiadmin.pem:ro,Z
       - vibebuild-srpms:/home/vibebuild/.cache/vibebuild
+    # The checkout includes this stand's keys and .env; the client gets an empty dir there
+    tmpfs:
+      - /workspace/dev/koji-server
     environment:
       KOJI_TARGET: ${KOJI_TARGET:-f44}
       KOJI_BUILD_TAG: ${KOJI_BUILD_TAG:-f44-build}

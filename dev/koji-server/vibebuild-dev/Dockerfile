@@ -17,7 +17,7 @@ ARG VB_UID=1000
 RUN useradd --uid "${VB_UID}" --create-home vibebuild \
     && mkdir -p /home/vibebuild/.cache/vibebuild /home/vibebuild/.koji \
     && chown -R vibebuild: /home/vibebuild \
-    && printf '#!/bin/sh\nexec python3 -m vibebuild "$@"\n' > /usr/local/bin/vibebuild \
+    && printf '#!/bin/sh\nexec python3 -P -m vibebuild "$@"\n' > /usr/local/bin/vibebuild \
     && chmod 755 /usr/local/bin/vibebuild
 
 # Nothing writes into the read-only checkout: no bytecode, no pytest cache, coverage in /tmp
